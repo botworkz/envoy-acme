@@ -1,0 +1,33 @@
+# Example configuration for envoy-acme.
+#
+# Every field can be overridden via environment variables using the
+# `ENVOY_ACME__SECTION__FIELD` convention, e.g.:
+#   ENVOY_ACME__ACME__DIRECTORY_URL=https://acme-v02.api.letsencrypt.org/directory
+
+acme:
+  # ACME directory URL. Defaults below point at the local Pebble test server.
+  # Let's Encrypt staging:    https://acme-staging-v02.api.letsencrypt.org/directory
+  # Let's Encrypt production: https://acme-v02.api.letsencrypt.org/directory
+  directory_url: "https://pebble:14000/dir"
+  contact: "mailto:admin@example.com"
+  domains:
+    - "example.test"
+  # Renew when within this many days of expiry.
+  renewal_window_days: 30
+  # Directory for persistent state (account.json, cert.pem, key.pem).
+  state_dir: "/var/lib/envoy-acme"
+
+ext_proc:
+  # gRPC listen address for the Envoy external processing service.
+  listen: "0.0.0.0:9000"
+
+sds:
+  # gRPC listen address for the Secret Discovery Service.
+  listen: "0.0.0.0:9001"
+  # The SDS resource name Envoy will subscribe to.
+  resource_name: "acme_cert"
+
+log:
+  # "json" or "pretty".
+  format: "json"
+  level: "info"

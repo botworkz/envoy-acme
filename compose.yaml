@@ -1,0 +1,62 @@
+# Local end-to-end stack:
+#
+#   pebble     - a small ACME test server (stands in for Let's Encrypt)
+#   envoy-acme - this service (ext_proc on :9000, SDS on :9001)
+#   envoy      - the data plane terminating TLS and routing challenges
+#   upstream   - a trivial demo backend
+#
+# This is a PROTOTYPE / PLAY stack. Do not use it in production.
+
+services:
+  pebble:
+    image: ghcr.io/letsencrypt/pebble:latest
+    command: -config /test/config/pebble.json -dnsserver 127.0.0.1:8053
+    volumes:
+      - ./config/pebble.json:/test/config/pebble.json:ro
+    environment:
+      PEBBLE_VA_NOSLEEP: "1"
+      PEBBLE_VA_ALWAYS_VALID: "0"
+    ports:
+      - "14000:14000"
+      - "15000:15000"
+
+  envoy-acme:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      - pebble
+    environment:
+      ENVOY_ACME__ACME__DIRECTORY_URL: "https://pebble:14000/dir"
+      ENVOY_ACME__ACME__DOMAINS: "example.test"
+      ENVOY_ACME__ACME__STATE_DIR: "/var/lib/envoy-acme"
+      ENVOY_ACME__LOG__FORMAT: "json"
+      # Pebble uses a self-signed CA; allow the ACME client to trust it.
+      ACME_CA_ROOT: "/test/certs/pebble.minica.pem"
+    volumes:
+      - acme-state:/var/lib/envoy-acme
+    expose:
+      - "9000"
+      - "9001"
+
+  envoy:
+    image: envoyproxy/envoy:v1.34-latest
+    depends_on:
+      - envoy-acme
+      - upstream
+    command: ["-c", "/etc/envoy/bootstrap.yaml", "--service-cluster", "envoy-acme-demo"]
+    volumes:
+      - ./envoy/bootstrap.yaml:/etc/envoy/bootstrap.yaml:ro
+    ports:
+      - "8080:80"
+      - "8443:443"
+      - "9901:9901"
+
+  upstream:
+    image: hashicorp/http-echo:latest
+    command: ["-text=hello from upstream", "-listen=:8080"]
+    expose:
+      - "8080"
+
+volumes:
+  acme-state:

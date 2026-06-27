@@ -1,0 +1,40 @@
+[package]
+name = "envoy-acme"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+description = "Prototype: Rust ext_proc + SDS service for Let's Encrypt / ACME with Envoy"
+license = "Apache-2.0"
+repository = "https://github.com/botworkz/envoy-acme"
+
+[[bin]]
+name = "envoy-acme"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+tonic = { version = "0.14", features = ["transport", "server", "codegen"] }
+prost = "0.14"
+prost-types = "0.14"
+envoy-types = "0.7"
+instant-acme = "0.7"
+rcgen = "0.13"
+rustls = { version = "0.23", features = ["ring"] }
+rustls-pemfile = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+thiserror = "2"
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+figment = { version = "0.10", features = ["yaml", "env"] }
+tokio-stream = "0.1"
+futures = "0.3"
+x509-parser = "0.16"
+time = "0.3"
+base64 = "0.22"
+
+[dev-dependencies]
+tempfile = "3"
