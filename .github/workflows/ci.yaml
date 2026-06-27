@@ -1,0 +1,119 @@
+name: ci
+
+on:
+  push:
+    branches:
+    - main
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - uses: dtolnay/rust-toolchain@stable
+    - run: cargo fmt --check
+
+  clippy:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - uses: dtolnay/rust-toolchain@stable
+    - run: cargo clippy --all-targets -- -D warnings
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - uses: dtolnay/rust-toolchain@stable
+    - run: cargo build --release --target=x86_64-unknown-linux-gnu
+
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - uses: dtolnay/rust-toolchain@stable
+    - run: cargo test
+
+  integration:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - uses: dtolnay/rust-toolchain@stable
+
+    - name: Start compose stack
+      run: docker compose up --build -d
+
+    - name: Register example.test DNS in challtestsrv
+      run: |
+        set -euo pipefail
+        # Wait for challtestsrv management API to become available.
+        for i in $(seq 1 30); do
+          curl -s -o /dev/null http://localhost:8055/ && break || true
+          sleep 1
+        done
+        # Resolve the envoy container's IP on the compose network so that
+        # Pebble can reach it during HTTP-01 validation.
+        ENVOY_IP=$(docker inspect \
+          "$(docker compose ps -q envoy)" \
+          --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}')
+        echo "Registering example.test → ${ENVOY_IP}"
+        curl -sf -X POST http://localhost:8055/add-a \
+          -H "Content-Type: application/json" \
+          -d "{\"host\":\"example.test\",\"addresses\":[\"${ENVOY_IP}\"]}"
+
+    - name: Wait for certificate issuance (up to 120 s)
+      run: |
+        set -euo pipefail
+        for i in $(seq 1 60); do
+          docker compose exec -T envoy \
+            test -f /var/lib/envoy-acme/certs/example.test.cert.pem && exit 0
+          sleep 2
+        done
+        echo "certificate not generated in time" >&2
+        docker compose logs envoy pebble challtestsrv
+        exit 1
+
+    - name: Verify certificate content and chain
+      run: |
+        set -euo pipefail
+        # Export the issued certificate from the container for verification.
+        docker compose exec -T envoy \
+          cat /var/lib/envoy-acme/certs/example.test.cert.pem > /tmp/example.test.cert.pem
+
+        # SAN must include the requested domain.
+        openssl x509 -in /tmp/example.test.cert.pem -noout \
+          -ext subjectAltName | grep -q "DNS:example.test"
+
+        # Certificate must chain to Pebble's CA.
+        # Pebble returns leaf + intermediate in the PEM chain; extract the
+        # leaf cert first so openssl verify can treat the rest as untrusted
+        # intermediates.
+        openssl x509 -in /tmp/example.test.cert.pem > /tmp/example.test.leaf.pem
+        test -s /tmp/example.test.leaf.pem
+        openssl verify \
+          -CAfile config/pebble-certs/pebble.minica.pem \
+          -untrusted /tmp/example.test.cert.pem \
+          /tmp/example.test.leaf.pem
+
+    - name: HTTPS end-to-end request
+      run: |
+        set -euo pipefail
+        RESP=$(curl -sSf \
+          --cacert config/pebble-certs/pebble.minica.pem \
+          --resolve example.test:8443:127.0.0.1 \
+          https://example.test:8443/)
+        echo "Response: ${RESP}"
+        echo "${RESP}" | grep -q "hello from upstream"
+
+    - name: Dump logs on failure
+      if: failure()
+      run: docker compose logs envoy pebble challtestsrv
+
+    - name: Tear down
+      if: always()
+      run: docker compose down -v
