@@ -8,25 +8,26 @@
 //! [`SdsConfig::resource_name`]: crate::config::SdsConfig::resource_name
 use std::pin::Pin;
 
-use envoy_types::pb::envoy::config::core::v3::{data_source, DataSource};
-use envoy_types::pb::envoy::extensions::transport_sockets::tls::v3::{
-    secret, Secret, TlsCertificate,
-};
-use envoy_types::pb::envoy::service::discovery::v3::{
+use envoy_proto::envoy::config::core::v3::{data_source, DataSource};
+use envoy_proto::envoy::extensions::transport_sockets::tls::v3::{secret, Secret, TlsCertificate};
+use envoy_proto::envoy::service::discovery::v3::{
     DeltaDiscoveryResponse, DiscoveryRequest, DiscoveryResponse,
 };
-use envoy_types::pb::envoy::service::secret::v3::secret_discovery_service_server::{
+use envoy_proto::envoy::service::secret::v3::secret_discovery_service_server::{
     SecretDiscoveryService, SecretDiscoveryServiceServer,
 };
-use envoy_types::pb::google::protobuf::Any;
 use futures::StreamExt;
-use prost::Name;
+use prost_types::Any;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
 use tracing::{debug, warn};
 
 use crate::cert_store::{CertBundle, CertStore};
+
+/// Protobuf type URL for `envoy.extensions.transport_sockets.tls.v3.Secret`.
+const SECRET_TYPE_URL: &str =
+    "type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.Secret";
 
 /// Build a `DiscoveryResponse` containing the cert bundle as an inline secret.
 fn build_secret_response(
@@ -55,17 +56,30 @@ fn build_secret_response(
     let mut value = Vec::new();
     prost::Message::encode(&secret, &mut value)?;
 
-    let type_url = Secret::type_url();
     Ok(DiscoveryResponse {
         version_info: bundle.version.to_string(),
         resources: vec![Any {
-            type_url: type_url.clone(),
+            type_url: SECRET_TYPE_URL.to_string(),
             value,
         }],
-        type_url,
+        type_url: SECRET_TYPE_URL.to_string(),
         nonce: bundle.version.to_string(),
         ..Default::default()
     })
+}
+
+/// Build a response for a bundle if it contains a cert, logging on encode error.
+fn response_for_bundle(resource_name: &str, bundle: CertBundle) -> Option<DiscoveryResponse> {
+    if bundle.cert_chain_pem.is_empty() {
+        return None;
+    }
+    match build_secret_response(resource_name, &bundle) {
+        Ok(resp) => Some(resp),
+        Err(err) => {
+            warn!(%err, "failed to encode SDS secret");
+            None
+        }
+    }
 }
 
 /// SDS service backed by the shared [`CertStore`].
@@ -91,16 +105,7 @@ impl SdsService {
     /// Build a response for the current cert bundle, if one is available.
     fn current_response(&self) -> Option<DiscoveryResponse> {
         let bundle = self.cert_store.current();
-        if bundle.cert_chain_pem.is_empty() {
-            return None;
-        }
-        match build_secret_response(&self.resource_name, &bundle) {
-            Ok(resp) => Some(resp),
-            Err(err) => {
-                warn!(%err, "failed to encode SDS secret");
-                None
-            }
-        }
+        response_for_bundle(&self.resource_name, bundle)
     }
 }
 
@@ -124,19 +129,6 @@ impl SecretDiscoveryService for SdsService {
         let (tx, rx) = mpsc::channel(4);
 
         tokio::spawn(async move {
-            let send_current = |bundle: CertBundle| {
-                if bundle.cert_chain_pem.is_empty() {
-                    return None;
-                }
-                match build_secret_response(&resource_name, &bundle) {
-                    Ok(resp) => Some(resp),
-                    Err(err) => {
-                        warn!(%err, "failed to encode SDS secret");
-                        None
-                    }
-                }
-            };
-
             loop {
                 tokio::select! {
                     message = inbound.next() => {
@@ -144,7 +136,7 @@ impl SecretDiscoveryService for SdsService {
                             Some(Ok(req)) => {
                                 debug!(version = %req.version_info, "SDS discovery request");
                                 let bundle = cert_rx.borrow().clone();
-                                if let Some(resp) = send_current(bundle) {
+                                if let Some(resp) = response_for_bundle(&resource_name, bundle) {
                                     if tx.send(Ok(resp)).await.is_err() {
                                         break;
                                     }
@@ -162,7 +154,7 @@ impl SecretDiscoveryService for SdsService {
                             break;
                         }
                         let bundle = cert_rx.borrow_and_update().clone();
-                        if let Some(resp) = send_current(bundle) {
+                        if let Some(resp) = response_for_bundle(&resource_name, bundle) {
                             if tx.send(Ok(resp)).await.is_err() {
                                 break;
                             }
@@ -188,7 +180,7 @@ impl SecretDiscoveryService for SdsService {
     async fn delta_secrets(
         &self,
         _request: Request<
-            Streaming<envoy_types::pb::envoy::service::discovery::v3::DeltaDiscoveryRequest>,
+            Streaming<envoy_proto::envoy::service::discovery::v3::DeltaDiscoveryRequest>,
         >,
     ) -> Result<Response<Self::DeltaSecretsStream>, Status> {
         Err(Status::unimplemented("delta SDS is not supported"))
@@ -209,8 +201,8 @@ mod tests {
         let resp = build_secret_response("acme_cert", &bundle).unwrap();
         assert_eq!(resp.version_info, "7");
         assert_eq!(resp.resources.len(), 1);
-        assert_eq!(resp.type_url, Secret::type_url());
-        assert_eq!(resp.resources[0].type_url, Secret::type_url());
+        assert_eq!(resp.type_url, SECRET_TYPE_URL);
+        assert_eq!(resp.resources[0].type_url, SECRET_TYPE_URL);
 
         let decoded: Secret = prost::Message::decode(resp.resources[0].value.as_slice()).unwrap();
         assert_eq!(decoded.name, "acme_cert");

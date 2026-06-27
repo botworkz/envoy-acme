@@ -56,7 +56,7 @@ Flow:
 ## Proto handling (no `protoc` required)
 
 The build is **hermetic** — only `cargo` is needed. Envoy protobuf types are
-consumed pre-generated from the [`envoy-types`](https://crates.io/crates/envoy-types)
+consumed from the [`envoy-proto`](https://github.com/phlax/envoy-proto-rs) crate (`phlax/envoy-proto-rs`)
 crate, so there is **no system `protoc` dependency** and no vendored protos to
 compile. See [`proto/README.md`](proto/README.md) for details.
 
@@ -131,7 +131,7 @@ src/
   acme.rs            ACME order/renewal state machine (instant-acme)
 config/              example config + Pebble config
 envoy/               example Envoy bootstrap
-proto/               proto-handling notes (we use envoy-types)
+proto/               proto-handling notes (we use envoy-proto from phlax/envoy-proto-rs)
 ```
 
 ## Development

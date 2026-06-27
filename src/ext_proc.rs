@@ -6,9 +6,9 @@
 //! server can validate the challenge without the request reaching any upstream.
 use std::pin::Pin;
 
-use envoy_types::pb::envoy::config::core::v3::HeaderMap;
-use envoy_types::pb::envoy::r#type::v3::HttpStatus;
-use envoy_types::pb::envoy::service::ext_proc::v3::{
+use envoy_proto::envoy::config::core::v3::HeaderMap;
+use envoy_proto::envoy::r#type::v3::HttpStatus;
+use envoy_proto::envoy::service::ext_proc::v3::{
     common_response::ResponseStatus,
     external_processor_server::{ExternalProcessor, ExternalProcessorServer},
     processing_request, processing_response, CommonResponse, HeadersResponse, HttpHeaders,
@@ -171,7 +171,7 @@ impl ExternalProcessor for ExtProcService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use envoy_types::pb::envoy::config::core::v3::HeaderValue;
+    use envoy_proto::envoy::config::core::v3::HeaderValue;
 
     #[test]
     fn token_extracted_from_valid_path() {

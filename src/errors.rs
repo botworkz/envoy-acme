@@ -18,6 +18,10 @@ pub enum AcmeError {
     OrderFailed(String),
 }
 
+/// Error type for the ext_proc gRPC server task.
+///
+/// TODO: surface these at the binary boundary once the server startup path
+/// returns structured errors instead of `anyhow`.
 #[allow(dead_code)]
 #[derive(Debug, Error)]
 pub enum ExtProcError {
@@ -27,6 +31,10 @@ pub enum ExtProcError {
     Status(#[from] tonic::Status),
 }
 
+/// Error type for the SDS gRPC server task.
+///
+/// TODO: surface these at the binary boundary once the server startup path
+/// returns structured errors instead of `anyhow`.
 #[allow(dead_code)]
 #[derive(Debug, Error)]
 pub enum SdsError {
@@ -40,6 +48,8 @@ pub enum SdsError {
 pub enum ConfigError {
     #[error("Configuration error: {0}")]
     Figment(#[from] figment::Error),
+    /// TODO: used when additional config validation is added on top of figment's
+    /// own required-field checking.
     #[allow(dead_code)]
     #[error("Missing required field: {0}")]
     MissingField(String),

@@ -6,9 +6,9 @@
 
 ## Development setup
 
-You need a recent stable Rust toolchain (the project targets Rust **1.88+**).
+You need a recent stable Rust toolchain (the project targets Rust **1.78+**).
 No system `protoc` is required — Envoy protobuf types come pre-generated from the
-[`envoy-types`](https://crates.io/crates/envoy-types) crate (see
+[`envoy-proto`](https://github.com/phlax/envoy-proto-rs) crate from `phlax/envoy-proto-rs` (see
 [`proto/README.md`](proto/README.md)).
 
 ```bash

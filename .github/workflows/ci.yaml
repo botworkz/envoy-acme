@@ -14,6 +14,8 @@ jobs:
   test:
     name: build, lint & test
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
 
@@ -48,6 +50,8 @@ jobs:
   docker:
     name: docker image
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
       - name: Build image

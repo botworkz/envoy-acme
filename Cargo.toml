@@ -2,7 +2,7 @@
 name = "envoy-acme"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.88"
+rust-version = "1.78"
 description = "Prototype: Rust ext_proc + SDS service for Let's Encrypt / ACME with Envoy"
 license = "Apache-2.0"
 repository = "https://github.com/botworkz/envoy-acme"
@@ -13,10 +13,10 @@ path = "src/main.rs"
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
-tonic = { version = "0.14", features = ["transport", "server", "codegen"] }
-prost = "0.14"
-prost-types = "0.14"
-envoy-types = "0.7"
+tonic = { version = "0.12", features = ["transport", "server", "codegen"] }
+prost = "0.13"
+prost-types = "0.13"
+envoy-proto = { git = "https://github.com/phlax/envoy-proto-rs", package = "envoy-proto" }
 instant-acme = "0.7"
 rcgen = "0.13"
 rustls = { version = "0.23", features = ["ring"] }
