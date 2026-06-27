@@ -1,0 +1,14 @@
+acme:
+  directory_cluster: acme_directory
+  directory_uri: https://acme-staging-v02.api.letsencrypt.org/directory
+  contact: mailto:admin@example.test
+  domains:
+  - example.test
+  renewal_window_days: 30
+  state_dir: /var/lib/envoy-acme
+  cert_sink:
+    type: filesystem
+    cert_dir: /var/lib/envoy-acme/certs
+    layout: per_domain
+log:
+  level: info
