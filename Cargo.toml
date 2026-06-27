@@ -1,0 +1,33 @@
+[package]
+name = "envoy_acme"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.78"
+license = "Apache-2.0"
+repository = "https://github.com/botworkz/envoy-acme"
+description = "Envoy ACME dynamic module prototype"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# Envoy v1.36.x SDK path (dynamic modules Rust SDK is consumed from Envoy repo tags).
+envoy-proxy-dynamic-modules-rust-sdk = { git = "https://github.com/envoyproxy/envoy", rev = "23f08d4e2a50ed822e113fc065043a4f2c9c2d0c", package = "envoy-proxy-dynamic-modules-rust-sdk" }
+instant-acme = "0.7"
+rcgen = "0.13"
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["rt", "macros", "time", "sync", "fs"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+parking_lot = "0.12"
+x509-parser = "0.16"
+time = "0.3"
+base64 = "0.22"
+tempfile = "3"
+
+[dev-dependencies]
+tempfile = "3"
+mockall = "0.13"

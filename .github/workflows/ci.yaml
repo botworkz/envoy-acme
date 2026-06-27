@@ -1,0 +1,56 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo fmt --check
+
+  clippy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo clippy --all-targets -- -D warnings
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release --target=x86_64-unknown-linux-gnu
+
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test
+
+  integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker compose up --build -d
+      - run: |
+          for i in $(seq 1 60); do
+            docker compose exec -T envoy test -f /var/lib/envoy-acme/certs/example.test.cert.pem && exit 0
+            sleep 1
+          done
+          echo "certificate not generated in time" >&2
+          docker compose logs envoy
+          exit 1
+      - run: |
+          curl -sSf --resolve example.test:8443:127.0.0.1 https://example.test:8443/ >/tmp/resp.txt || true
+          docker compose logs envoy
+      - if: always()
+        run: docker compose down -v

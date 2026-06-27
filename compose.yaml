@@ -1,0 +1,35 @@
+services:
+  pebble:
+    image: ghcr.io/letsencrypt/pebble:latest
+    command: -config /test/config/pebble.json -dnsserver 127.0.0.1:8053
+    volumes:
+      - ./config/pebble.json:/test/config/pebble.json:ro
+    environment:
+      PEBBLE_VA_NOSLEEP: "1"
+      PEBBLE_VA_ALWAYS_VALID: "0"
+    ports:
+      - "14000:14000"
+      - "15000:15000"
+
+  envoy:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      - pebble
+      - upstream
+    ports:
+      - "8080:80"
+      - "8443:443"
+      - "9901:9901"
+    volumes:
+      - acme-state:/var/lib/envoy-acme
+
+  upstream:
+    image: hashicorp/http-echo:latest
+    command: ["-text=hello from upstream", "-listen=:8080"]
+    expose:
+      - "8080"
+
+volumes:
+  acme-state:
