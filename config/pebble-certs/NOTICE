@@ -1,0 +1,13 @@
+Pebble test CA certificate
+==========================
+
+The file `pebble.minica.pem` is taken verbatim from the letsencrypt/pebble
+repository (https://github.com/letsencrypt/pebble) at commit pinned below.
+
+Source: https://github.com/letsencrypt/pebble/blob/main/test/certs/pebble.minica.pem
+License: Apache-2.0 (https://github.com/letsencrypt/pebble/blob/main/LICENSE.txt)
+
+SHA-256: 0c502e52627ff7de972c7e9e065640103b4589b4e2d23d3fcf21bef1e3c8c67c
+
+This certificate is used ONLY in the integration CI smoke test to trust
+Pebble's self-signed server certificate.  It MUST NOT be used in production.
