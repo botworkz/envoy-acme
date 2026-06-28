@@ -27,7 +27,13 @@ x509-parser = "0.16"
 time = "0.3"
 base64 = "0.22"
 tempfile = "3"
+# Custom HTTPS client for user-supplied CA cert (e.g. Pebble in integration tests).
+hyper = "1"
+hyper-util = { version = "0.1", features = ["client-legacy", "tokio"] }
+hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "ring", "tls12"] }
+rustls = "0.23"
+rustls-pemfile = "2"
+http-body-util = "0.1"
 
 [dev-dependencies]
-tempfile = "3"
 mockall = "0.13"

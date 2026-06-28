@@ -14,12 +14,22 @@ pub struct Config {
 pub struct AcmeConfig {
     pub directory_cluster: String,
     pub directory_uri: String,
+    /// Path to a PEM file containing a CA certificate bundle to trust when
+    /// connecting to the ACME directory.  Primarily used in integration tests
+    /// to trust Pebble's self-signed CA.  When absent, the system native roots
+    /// are used.
+    #[serde(default)]
+    pub directory_ca_file: Option<PathBuf>,
     pub contact: String,
     pub domains: Vec<String>,
     #[serde(default = "default_renewal_window_days")]
     pub renewal_window_days: u64,
     pub state_dir: PathBuf,
     pub cert_sink: CertSinkConfig,
+    /// How often (in seconds) the ACME state machine timer fires to check for
+    /// renewal.  Defaults to 60.  Set lower in integration environments.
+    #[serde(default = "default_tick_seconds")]
+    pub tick_seconds: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -54,6 +64,10 @@ impl Default for LogConfig {
 
 fn default_renewal_window_days() -> u64 {
     30
+}
+
+fn default_tick_seconds() -> u64 {
+    60
 }
 
 fn default_log_level() -> String {

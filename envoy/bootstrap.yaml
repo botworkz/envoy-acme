@@ -23,10 +23,15 @@ bootstrap_extensions:
           acme:
             directory_cluster: acme_directory
             directory_uri: https://pebble:14000/dir
+            # Trust Pebble's self-signed CA so instant-acme can verify the
+            # directory TLS certificate.  Remove in production environments.
+            directory_ca_file: /etc/envoy/pebble-certs/pebble.minica.pem
             contact: mailto:admin@example.test
             domains:
               - example.test
             renewal_window_days: 30
+            # Low tick interval for the integration smoke test; raise in production.
+            tick_seconds: 5
             state_dir: /var/lib/envoy-acme
             cert_sink:
               type: filesystem
@@ -120,6 +125,9 @@ static_resources:
                       address: upstream
                       port_value: 8080
 
+    # acme_directory is reserved for a future send_http_callout-based ACME
+    # implementation (see TODO in src/acme/order.rs).  instant-acme currently
+    # owns its own HTTPS transport, so this cluster is not actively used.
     - name: acme_directory
       connect_timeout: 2s
       type: STRICT_DNS

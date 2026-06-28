@@ -49,6 +49,7 @@ impl AcmeStateMachine {
             &self.config.directory_uri,
             &self.config.contact,
             &self.config.state_dir.join(ACCOUNT_FILE),
+            self.config.directory_ca_file.as_deref(),
         )
         .await?;
 

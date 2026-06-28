@@ -1,7 +1,19 @@
 services:
+  challtestsrv:
+    image: ghcr.io/letsencrypt/pebble-challtestsrv:latest
+    # Start with no default A record; the CI step registers example.test → envoy
+    # via the management API on :8055 after the stack is up.
+    command: -defaultIPv4 "" -defaultIPv6 ""
+    ports:
+      - "8055:8055"
+
   pebble:
     image: ghcr.io/letsencrypt/pebble:latest
-    command: -config /test/config/pebble.json -dnsserver 127.0.0.1:8053
+    # Use challtestsrv as the DNS resolver so HTTP-01 challenges for example.test
+    # can be routed to the envoy container.
+    command: -config /test/config/pebble.json -dnsserver challtestsrv:8053
+    depends_on:
+      - challtestsrv
     volumes:
       - ./config/pebble.json:/test/config/pebble.json:ro
     environment:

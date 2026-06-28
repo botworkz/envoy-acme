@@ -11,10 +11,9 @@ use crate::config::Config;
 use crate::errors::RuntimeError;
 use crate::runtime::RuntimeBridge;
 
-const DEFAULT_TICK_SECONDS: u64 = 60;
-
 pub struct AcmeBootstrapConfig {
     runtime: RuntimeBridge,
+    tick_seconds: u64,
     _timer: Arc<Mutex<Option<Box<dyn EnvoyBootstrapExtensionTimer>>>>,
 }
 
@@ -23,13 +22,15 @@ impl AcmeBootstrapConfig {
         envoy_config: &mut dyn EnvoyBootstrapExtensionConfig,
         config: Config,
     ) -> Result<Self, RuntimeError> {
+        let tick_seconds = config.acme.tick_seconds;
         let runtime = RuntimeBridge::new(config);
         let timer = envoy_config.new_timer();
-        timer.enable(std::time::Duration::from_secs(DEFAULT_TICK_SECONDS));
+        timer.enable(std::time::Duration::from_secs(tick_seconds));
         envoy_config.signal_init_complete();
 
         Ok(Self {
             runtime,
+            tick_seconds,
             _timer: Arc::new(Mutex::new(Some(timer))),
         })
     }
@@ -53,7 +54,7 @@ impl BootstrapExtensionConfig for AcmeBootstrapConfig {
         if let Err(e) = self.runtime.tick() {
             envoy_proxy_dynamic_modules_rust_sdk::envoy_log_error!("envoy-acme: tick failed: {e}");
         }
-        timer.enable(std::time::Duration::from_secs(DEFAULT_TICK_SECONDS));
+        timer.enable(std::time::Duration::from_secs(self.tick_seconds));
     }
 
     fn on_http_callout_done(

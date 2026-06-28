@@ -21,7 +21,7 @@ Why this exists:
 Envoy main thread
   ├─ Bootstrap extension
   │   ├─ timer -> ACME state machine (single-thread tokio runtime)
-  │   └─ publishes cert/key -> FilesystemSink
+  │   └─ publishes cert/key + SDS secret file -> FilesystemSink
   └─ Envoy filesystem SDS reloads TLS material from cert dir
 
 Envoy worker thread
@@ -51,6 +51,43 @@ See:
 
 Config bytes are parsed as JSON first, then YAML.
 
+Notable config options in `acme:`:
+- `directory_ca_file` (optional): path to a PEM CA bundle to trust when connecting to the ACME directory (e.g. Pebble's self-signed CA in integration tests). Omit to use the system native roots.
+- `tick_seconds` (default `60`): how often the renewal state machine timer fires. Set lower in integration environments.
+
+## Integration test topology
+
+The CI `integration` job validates a real end-to-end certificate issuance flow:
+
+```text
+ ┌──────────────────────────────────────────────────────────┐
+ │  Docker Compose network                                   │
+ │                                                           │
+ │  ┌──────────┐  HTTP-01 validation   ┌────────────────┐  │
+ │  │  pebble  │ ─────────────────────▶│     envoy      │  │
+ │  │  :14000  │                       │  :80 (HTTP)    │  │
+ │  └──────────┘                       │  :443 (HTTPS)  │  │
+ │       │ DNS query                   └────────────────┘  │
+ │       ▼                                      │           │
+ │  ┌────────────────┐                          ▼           │
+ │  │ challtestsrv   │              ┌───────────────────┐  │
+ │  │ :8053 (DNS)    │              │     upstream      │  │
+ │  │ :8055 (mgmt)   │              │  hashicorp/http-  │  │
+ │  └────────────────┘              │  echo ":8080"     │  │
+ │                                  └───────────────────┘  │
+ └──────────────────────────────────────────────────────────┘
+```
+
+What the integration job verifies:
+1. Envoy starts with the dynamic module loaded.
+2. The module contacts Pebble and completes HTTP-01 challenge validation via the in-process HTTP filter.
+3. `FilesystemSink` writes `example.test.cert.pem`, `example.test.key.pem`, and the Envoy SDS secret file `example.test.secret.yaml`.
+4. Envoy's HTTPS listener warms up using the SDS secret file and serves traffic.
+5. `curl --cacert pebble.minica.pem https://example.test:8443/` returns HTTP 200 with body `hello from upstream`.
+6. The certificate SAN contains `DNS:example.test` and chains to Pebble's CA.
+
+`challtestsrv` acts as a programmable DNS server: the CI step registers `example.test → envoy container IP` via its management API on `:8055` before triggering issuance, so Pebble can perform real HTTP-01 validation rather than skipping it.
+
 ## Known limitations
 
 - HTTP-01 only.
@@ -58,3 +95,4 @@ Config bytes are parsed as JSON first, then YAML.
 - `FilesystemSink` only.
 - ABI pinned to Envoy `v1.36.9` SDK.
 - Panic in dynamic module can still affect proxy process; callbacks are guarded by SDK `catch_unwind` wrappers.
+- `directory_cluster` in config is reserved for a future `send_http_callout`-based ACME transport; instant-acme currently owns its own HTTPS transport.
