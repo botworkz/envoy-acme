@@ -7,7 +7,7 @@ on:
   pull_request:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   fmt:
@@ -30,6 +30,11 @@ jobs:
     - uses: actions/checkout@v4
     - uses: dtolnay/rust-toolchain@stable
     - run: cargo build --release --target=x86_64-unknown-linux-gnu
+    - uses: actions/upload-artifact@v4
+      with:
+        name: libenvoy_acme-x86_64-unknown-linux-gnu
+        path: target/x86_64-unknown-linux-gnu/release/libenvoy_acme.so
+        retention-days: 14
 
   unit:
     runs-on: ubuntu-latest
@@ -141,3 +146,74 @@ jobs:
     - name: Tear down
       if: always()
       run: docker compose down -v
+
+  release:
+    needs: [fmt, clippy, build, unit, integration]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Decide whether to publish
+      id: gate
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        if [[ ! -f VERSION ]]; then
+          echo "::error::VERSION file is missing at the repository root"
+          exit 1
+        fi
+
+        version="$(sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' VERSION)"
+        if [[ -z "${version}" ]]; then
+          echo "::error::VERSION is empty after trimming whitespace"
+          exit 1
+        fi
+
+        if [[ "${version}" == *-dev ]]; then
+          echo "VERSION ${version} ends with -dev; skipping release."
+          echo "skip=true" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        tag="v${version}"
+        if gh release view "${tag}" >/dev/null 2>&1; then
+          echo "::warning::GitHub release ${tag} already exists; skipping publish."
+          echo "skip=true" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        echo "skip=false" >> "$GITHUB_OUTPUT"
+        echo "version=${version}" >> "$GITHUB_OUTPUT"
+        echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+
+    - uses: actions/download-artifact@v4
+      if: steps.gate.outputs.skip == 'false'
+      with:
+        name: libenvoy_acme-x86_64-unknown-linux-gnu
+        path: ./artifact
+
+    - name: Prepare release assets
+      if: steps.gate.outputs.skip == 'false'
+      shell: bash
+      run: |
+        set -euo pipefail
+        mkdir -p dist
+        staged="dist/libenvoy_acme-${{ steps.gate.outputs.version }}-x86_64-unknown-linux-gnu.so"
+        cp ./artifact/libenvoy_acme.so "${staged}"
+        test -s "${staged}"
+        sha256sum "${staged}" > "${staged}.sha256"
+
+    - name: Publish GitHub release
+      if: steps.gate.outputs.skip == 'false'
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: ${{ steps.gate.outputs.tag }}
+        name: ${{ steps.gate.outputs.tag }}
+        generate_release_notes: true
+        files: |
+          dist/libenvoy_acme-${{ steps.gate.outputs.version }}-x86_64-unknown-linux-gnu.so
+          dist/libenvoy_acme-${{ steps.gate.outputs.version }}-x86_64-unknown-linux-gnu.so.sha256
