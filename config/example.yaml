@@ -1,5 +1,10 @@
 acme:
   directory_profile: staging
+  # directory_uri is optional for staging/production profiles; they resolve
+  # the Let's Encrypt URL automatically.  For a custom profile supply a URL
+  # that MUST use https://.  To allow a plain http:// URL for local testing
+  # (e.g. Pebble without TLS) also set:
+  #   allow_insecure_directory: true  # TEST ONLY – do not use in production
   contact: mailto:admin@example.test
   domains:
   - example.test

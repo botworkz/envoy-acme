@@ -42,6 +42,12 @@ struct RawAcmeConfig {
     /// are used.
     #[serde(default)]
     directory_ca_file: Option<PathBuf>,
+    /// Permit a plain-HTTP `directory_uri` when `directory_profile` is
+    /// `custom`.  Must be explicitly set to `true`; credentials and nonces
+    /// will traverse the network in cleartext.  Only intended for local
+    /// integration-test environments (e.g. Pebble without TLS).
+    #[serde(default)]
+    allow_insecure_directory: Option<bool>,
     contact: String,
     domains: Vec<String>,
     #[serde(default = "default_renewal_window_days")]
@@ -106,6 +112,43 @@ impl TryFrom<RawAcmeConfig> for AcmeConfig {
                 uri.to_string()
             }
         };
+
+        // Enforce HTTPS scheme.  For `staging`/`production` the resolved URL
+        // is always https:// already.  For `custom` (and no-profile), reject
+        // plain HTTP unless the operator has explicitly opted in via
+        // `allow_insecure_directory: true`.
+        let scheme = directory_uri
+            .split_once("://")
+            .map(|(s, _)| s)
+            .unwrap_or("");
+        match scheme {
+            "https" => {}
+            "http" if raw.directory_profile == Some(DirectoryProfile::Custom) => {
+                if !raw.allow_insecure_directory.unwrap_or(false) {
+                    return Err(
+                        "acme.directory_uri uses plain HTTP; set acme.allow_insecure_directory: true \
+                        to permit this (custom profile only)".to_string(),
+                    );
+                }
+                tracing::warn!(
+                    directory_uri = %directory_uri,
+                    "envoy-acme: directory_uri uses plain HTTP; credentials and nonces will \
+                    traverse the network in cleartext",
+                );
+            }
+            "http" => {
+                return Err(
+                    "acme.directory_uri must use https:// scheme; plain HTTP is not permitted \
+                    for staging or production profiles"
+                        .to_string(),
+                );
+            }
+            other => {
+                return Err(format!(
+                    "acme.directory_uri must use https:// scheme (got {other:?})"
+                ));
+            }
+        }
 
         if raw.tick_seconds == 0 {
             return Err("acme.tick_seconds must be >= 1 (got 0)".to_string());
@@ -560,6 +603,95 @@ acme:
         assert!(
             msg.contains("cert_sink.type") && msg.contains("filesystem"),
             "error should mention cert_sink.type support, got: {msg}"
+        );
+    }
+
+    // ── HTTPS scheme enforcement ──────────────────────────────────────────────
+
+    // staging + http override → rejected (staging never allows http)
+    #[test]
+    fn staging_profile_http_uri_rejected() {
+        let raw = base_yaml(&format!(
+            "directory_profile: staging\n  directory_uri: {LE_STAGING_URL}"
+        ))
+        .replace("https://", "http://");
+        let err = Config::from_bytes(raw.as_bytes()).expect_err("http staging URI should fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("https") || msg.contains("staging"),
+            "error should mention https or staging, got: {msg}"
+        );
+    }
+
+    // production + http override → rejected
+    #[test]
+    fn production_profile_http_uri_rejected() {
+        let raw = base_yaml(&format!(
+            "directory_profile: production\n  directory_uri: {LE_PRODUCTION_URL}"
+        ))
+        .replace("https://", "http://");
+        let err = Config::from_bytes(raw.as_bytes()).expect_err("http production URI should fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("https") || msg.contains("production"),
+            "error should mention https or production, got: {msg}"
+        );
+    }
+
+    // custom + http without opt-in → rejected
+    #[test]
+    fn custom_profile_http_uri_without_opt_in_rejected() {
+        let raw =
+            base_yaml("directory_profile: custom\n  directory_uri: http://internal-acme.test/dir");
+        let err = Config::from_bytes(raw.as_bytes())
+            .expect_err("http custom URI without opt-in should fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("allow_insecure_directory"),
+            "error should mention allow_insecure_directory, got: {msg}"
+        );
+    }
+
+    // custom + http + allow_insecure_directory: true → accepted
+    #[test]
+    fn custom_profile_http_uri_with_opt_in_accepted() {
+        let raw = base_yaml(
+            "directory_profile: custom\n  directory_uri: http://internal-acme.test/dir\n  allow_insecure_directory: true",
+        );
+        let cfg = Config::from_bytes(raw.as_bytes())
+            .expect("http custom URI with opt-in should be accepted");
+        assert_eq!(cfg.acme.directory_uri, "http://internal-acme.test/dir");
+    }
+
+    // custom + https → accepted (no warn needed, standard path)
+    #[test]
+    fn custom_profile_https_uri_accepted() {
+        let raw = base_yaml("directory_profile: custom\n  directory_uri: https://pebble:14000/dir");
+        let cfg = Config::from_bytes(raw.as_bytes()).expect("https custom URI should be accepted");
+        assert_eq!(cfg.acme.directory_uri, "https://pebble:14000/dir");
+    }
+
+    // no profile + http → rejected (not custom, so no opt-in path)
+    #[test]
+    fn no_profile_http_uri_rejected() {
+        let raw = base_yaml("directory_uri: http://example.invalid/directory");
+        let err = Config::from_bytes(raw.as_bytes()).expect_err("http no-profile URI should fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("https"),
+            "error should mention https, got: {msg}"
+        );
+    }
+
+    // unknown scheme → rejected
+    #[test]
+    fn unknown_scheme_rejected() {
+        let raw = base_yaml("directory_uri: ftp://example.invalid/directory");
+        let err = Config::from_bytes(raw.as_bytes()).expect_err("ftp URI should fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("https") || msg.contains("ftp"),
+            "error should mention https or the bad scheme, got: {msg}"
         );
     }
 }
