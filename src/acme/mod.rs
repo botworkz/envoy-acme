@@ -463,12 +463,18 @@ impl AcmeStateMachine {
                 })
                 .unwrap_or_default();
 
-            let missing: Vec<&str> = self
+            let configured_lc: Vec<String> = self
                 .config
                 .domains
                 .iter()
-                .filter(|d| !cert_dns_names.contains(d.to_lowercase().as_str()))
-                .map(String::as_str)
+                .map(|d| d.to_ascii_lowercase())
+                .collect();
+
+            let missing: Vec<&str> = configured_lc
+                .iter()
+                .zip(self.config.domains.iter())
+                .filter(|(lc, _)| !cert_dns_names.contains(lc.as_str()))
+                .map(|(_, orig)| orig.as_str())
                 .collect();
 
             if !missing.is_empty() {
@@ -1207,7 +1213,7 @@ mod tests {
             key_pem,
         };
 
-        // Persist with the two-domain config sentinel (sentinel = SHA-256(cert)).
+        // Write cert and key files manually with a sentinel matching the cert hash.
         std::fs::write(tmp.path().join(CERT_FILE), &cert_pem).unwrap();
         std::fs::write(tmp.path().join(KEY_FILE), bundle.key_pem.clone()).unwrap();
         std::fs::write(tmp.path().join(SENTINEL_FILE), sha256_hex(&cert_pem)).unwrap();
