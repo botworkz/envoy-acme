@@ -19,6 +19,7 @@ const ACCOUNT_FILE: &str = "account.json";
 const CERT_FILE: &str = "cert.pem";
 const KEY_FILE: &str = "key.pem";
 const BACKOFF_FILE: &str = "backoff.json";
+const SECONDS_PER_DAY: i64 = 86_400;
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum StateSummary {
@@ -34,7 +35,7 @@ pub(crate) enum StateSummary {
 
 pub(crate) fn inspect_state(
     state_dir: &Path,
-    _domain: &str,
+    domain: &str,
     renewal_window_days: u64,
 ) -> StateSummary {
     let cert_path = state_dir.join(CERT_FILE);
@@ -45,7 +46,10 @@ pub(crate) fn inspect_state(
     let key_path = state_dir.join(KEY_FILE);
     if !key_path.exists() {
         return StateSummary::CertCachedButInvalid {
-            reason: format!("missing key file: {}", key_path.display()),
+            reason: format!(
+                "missing key file for domain {domain}: {}",
+                key_path.display()
+            ),
         };
     }
 
@@ -53,14 +57,14 @@ pub(crate) fn inspect_state(
         Ok(cert) => cert,
         Err(e) => {
             return StateSummary::CertCachedButInvalid {
-                reason: format!("failed to read cert file: {e}"),
+                reason: format!("failed to read cert file for domain {domain}: {e}"),
             };
         }
     };
 
     if let Err(e) = std::fs::read(&key_path) {
         return StateSummary::CertCachedButInvalid {
-            reason: format!("failed to read key file: {e}"),
+            reason: format!("failed to read key file for domain {domain}: {e}"),
         };
     }
 
@@ -68,7 +72,7 @@ pub(crate) fn inspect_state(
         Ok(v) => v,
         Err(e) => {
             return StateSummary::CertCachedButInvalid {
-                reason: format!("cert parse failed: {e}"),
+                reason: format!("cert parse failed for domain {domain}: {e}"),
             };
         }
     };
@@ -77,19 +81,22 @@ pub(crate) fn inspect_state(
         Ok(v) => v,
         Err(_) => {
             return StateSummary::CertCachedButInvalid {
-                reason: "cert has invalid negative not_after".to_string(),
+                reason: "cert has invalid not_after timestamp".to_string(),
             };
         }
     };
 
     let now_unix = time::OffsetDateTime::now_utc().unix_timestamp();
     if not_after <= now_unix {
+        let not_after_iso = time::OffsetDateTime::from_unix_timestamp(not_after)
+            .map(|dt| dt.to_string())
+            .unwrap_or_else(|_| format!("unix:{not_after}"));
         return StateSummary::CertCachedButInvalid {
-            reason: format!("cert expired at {not_after}"),
+            reason: format!("cert expired for domain {domain} at {not_after_iso}"),
         };
     }
 
-    let days_until_expiry = (not_after - now_unix) / 86_400;
+    let days_until_expiry = (not_after - now_unix) / SECONDS_PER_DAY;
     let days_until_renewal = days_until_expiry - (renewal_window_days as i64);
 
     StateSummary::CertCached {
