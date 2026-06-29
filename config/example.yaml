@@ -1,6 +1,5 @@
 acme:
-  directory_cluster: acme_directory
-  directory_uri: https://acme-staging-v02.api.letsencrypt.org/directory
+  directory_profile: staging
   contact: mailto:admin@example.test
   domains:
   - example.test

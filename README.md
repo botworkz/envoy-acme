@@ -53,6 +53,51 @@ See:
 Config bytes are parsed as JSON first, then YAML.
 
 Notable config options in `acme:`:
+
+- `directory_profile` (optional): selects a known ACME directory by name.
+  When set, `directory_uri` is resolved automatically and need not be
+  specified (though it may be supplied for documentation purposes, in which
+  case it must exactly match the resolved URL or the config will be rejected).
+
+  | Value | Directory URL used |
+  |---|---|
+  | `staging` | `https://acme-staging-v02.api.letsencrypt.org/directory` |
+  | `production` | `https://acme-v02.api.letsencrypt.org/directory` |
+  | `custom` | value of `directory_uri` (required) |
+
+  Example — staging (no `directory_uri` needed):
+  ```yaml
+  acme:
+    directory_profile: staging
+    contact: mailto:admin@example.com
+    domains: [example.com]
+    state_dir: /var/lib/envoy-acme
+    cert_sink:
+      type: filesystem
+      cert_dir: /var/lib/envoy-acme/certs
+  ```
+
+  Example — custom (e.g. Pebble in integration tests):
+  ```yaml
+  acme:
+    directory_profile: custom
+    directory_uri: https://pebble:14000/dir
+    contact: mailto:admin@example.test
+    domains: [example.test]
+    state_dir: /var/lib/envoy-acme
+    cert_sink:
+      type: filesystem
+      cert_dir: /var/lib/envoy-acme/certs
+  ```
+
+  When `directory_profile` is not set, `directory_uri` is required and used
+  verbatim (equivalent to `custom`).
+
+- `directory_uri` (optional when a `staging` or `production` profile is set,
+  required otherwise): the ACME directory URL.  ACME directory traffic uses
+  the embedded HTTPS client (via `instant-acme`), not an Envoy cluster.
+  Cluster-routed ACME is not yet supported.
+
 - `directory_ca_file` (optional): path to a PEM CA bundle to trust when connecting to the ACME directory (e.g. Pebble's self-signed CA in integration tests). Omit to use the system native roots.
 - `tick_seconds` (default `60`): how often the renewal state machine timer fires. Set lower in integration environments.
 
@@ -108,4 +153,3 @@ What the integration job verifies:
 - `FilesystemSink` only.
 - ABI pinned to Envoy `v1.38.0` SDK.
 - Panic in dynamic module can still affect proxy process; callbacks are guarded by SDK `catch_unwind` wrappers.
-- `directory_cluster` in config is reserved for a future `send_http_callout`-based ACME transport; instant-acme currently owns its own HTTPS transport.
