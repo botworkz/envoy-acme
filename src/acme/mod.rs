@@ -279,7 +279,7 @@ mod tests {
 
     fn test_config(state_dir: &std::path::Path) -> AcmeConfig {
         AcmeConfig {
-            directory_cluster: "test".into(),
+            directory_profile: None,
             directory_uri: "https://acme.invalid/directory".into(),
             directory_ca_file: None,
             contact: "mailto:test@example.test".into(),
