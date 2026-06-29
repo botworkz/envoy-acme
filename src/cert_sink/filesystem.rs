@@ -1,9 +1,6 @@
-use std::fs::{self, File};
-use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use serde::Serialize;
-use tempfile::NamedTempFile;
 
 use crate::cert_sink::{CertBundle, CertSink};
 use crate::config::Layout;
@@ -72,32 +69,6 @@ impl FilesystemSink {
         format!("{base}_tls")
     }
 
-    fn write_atomic(path: &Path, bytes: &[u8], private: bool) -> Result<(), SinkError> {
-        let parent = path.parent().ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::InvalidInput, "missing parent directory")
-        })?;
-
-        fs::create_dir_all(parent)?;
-
-        let mut tmp = NamedTempFile::new_in(parent)?;
-        tmp.write_all(bytes)?;
-        tmp.as_file_mut().sync_all()?;
-
-        #[cfg(unix)]
-        if private {
-            use std::os::unix::fs::PermissionsExt;
-            tmp.as_file()
-                .set_permissions(fs::Permissions::from_mode(0o600))?;
-        }
-
-        tmp.persist(path)?;
-
-        let dir = File::open(parent)?;
-        dir.sync_all()?;
-
-        Ok(())
-    }
-
     /// Build the Envoy SDS secret YAML for this domain and write it atomically.
     ///
     /// The secret file is written *after* cert+key are durable so that Envoy
@@ -132,15 +103,16 @@ impl FilesystemSink {
 
         let yaml = serde_yaml::to_string(&payload).map_err(std::io::Error::other)?;
 
-        Self::write_atomic(&secret_path, yaml.as_bytes(), false)
+        crate::atomic_write::write_atomic(&secret_path, yaml.as_bytes(), false)?;
+        Ok(())
     }
 }
 
 impl CertSink for FilesystemSink {
     fn publish(&self, name: &str, bundle: &CertBundle) -> Result<(), SinkError> {
         // Write cert and key first so they are durable before the SDS file.
-        Self::write_atomic(&self.cert_path(name), &bundle.cert_pem, false)?;
-        Self::write_atomic(&self.key_path(name), &bundle.key_pem, true)?;
+        crate::atomic_write::write_atomic(&self.cert_path(name), &bundle.cert_pem, false)?;
+        crate::atomic_write::write_atomic(&self.key_path(name), &bundle.key_pem, true)?;
         // Write the Envoy SDS secret file last: Envoy reloads on this path so
         // cert+key must already be in place.
         self.write_sds_secret(name)?;
