@@ -182,7 +182,10 @@ impl AcmeStateMachine {
         if let Some((bundle, not_after)) = cached {
             // Keep the most recently observed cert expiry in memory for heartbeat logs.
             self.last_not_after_unix = Some(not_after);
-            if !renewal::needs_renewaxl_at_with_domain_offset(
+            if let Ok(not_after_unix) = u64::try_from(not_after) {
+                metrics::set_cert_not_after(domain, not_after_unix);
+            }
+            if !renewal::needs_renewal_at_with_domain_offset(
                 not_after,
                 now_unix,
                 self.config.renewal_window_days,
@@ -247,13 +250,10 @@ impl AcmeStateMachine {
                         metrics::set_next_retry_at(domain, next_retry_at_unix);
                     }
                 }
-<<<<<<< HEAD
                 metrics::set_consecutive_failures(domain, self.backoff.consecutive_failures);
-=======
                 if emit_heartbeat {
                     self.emit_heartbeat(now_unix, false);
                 }
->>>>>>> bc04f96 (acme: Add periodic heartbeat logs and tests)
                 // Non-rate-limit errors propagate as-is; the caller logs them
                 // and retries on the next ordinary tick interval.
                 Err(e)
@@ -997,6 +997,7 @@ mod tests {
         let (cert_pem, key_pem) = generate_cert(not_after);
         std::fs::write(tmp.path().join("cert.pem"), &cert_pem).unwrap();
         std::fs::write(tmp.path().join("key.pem"), &key_pem).unwrap();
+        std::fs::write(tmp.path().join(SENTINEL_FILE), sha256_hex(&cert_pem)).unwrap();
 
         struct DevNull;
         impl CertSink for DevNull {
@@ -1035,6 +1036,7 @@ mod tests {
         let (cert_pem, key_pem) = generate_cert(not_after);
         std::fs::write(tmp.path().join("cert.pem"), &cert_pem).unwrap();
         std::fs::write(tmp.path().join("key.pem"), &key_pem).unwrap();
+        std::fs::write(tmp.path().join(SENTINEL_FILE), sha256_hex(&cert_pem)).unwrap();
 
         struct DevNull;
         impl CertSink for DevNull {
@@ -1066,6 +1068,7 @@ mod tests {
         let (cert_pem, key_pem) = generate_cert(not_after);
         std::fs::write(tmp.path().join("cert.pem"), &cert_pem).unwrap();
         std::fs::write(tmp.path().join("key.pem"), &key_pem).unwrap();
+        std::fs::write(tmp.path().join(SENTINEL_FILE), sha256_hex(&cert_pem)).unwrap();
 
         struct DevNull;
         impl CertSink for DevNull {
@@ -1096,5 +1099,40 @@ mod tests {
                 n => Err(format!("expected exactly two heartbeat events, got {n}")),
             }
         });
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn cached_cert_emits_not_after_metric() {
+        let _guard = crate::metrics::test_lock();
+        crate::metrics::reset_test_state();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let now_unix = 1_000_000i64;
+        let not_after = now_unix + 90 * 86_400; // outside the 30-day window
+        let (cert_pem, key_pem) = generate_cert(not_after);
+        std::fs::write(tmp.path().join("cert.pem"), &cert_pem).unwrap();
+        std::fs::write(tmp.path().join("key.pem"), &key_pem).unwrap();
+        std::fs::write(tmp.path().join(SENTINEL_FILE), sha256_hex(&cert_pem)).unwrap();
+
+        struct DevNull;
+        impl CertSink for DevNull {
+            fn publish(&self, _: &str, _: &CertBundle) -> Result<(), SinkError> {
+                Ok(())
+            }
+        }
+
+        let issuer = Box::new(MockIssuer::with_results(vec![]));
+        let mut sm =
+            AcmeStateMachine::new_with_issuer(test_config(tmp.path()), Box::new(DevNull), issuer);
+
+        sm.tick_at(now_unix).await.unwrap();
+
+        let metrics: std::collections::HashSet<_> =
+            crate::metrics::take_test_updates().into_iter().collect();
+        assert!(metrics.contains(&format!(
+            "envoy_acme_cert_not_after_seconds:a.example.test:{}",
+            not_after
+        )));
     }
 }
