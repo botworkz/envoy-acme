@@ -1,17 +1,5 @@
 use crate::errors::AcmeError;
 
-/// Returns `true` if the certificate should be renewed.
-///
-/// This is a thin wrapper around [`needs_renewal_at_with_domain_offset`] that
-/// passes an empty domain string, resulting in zero offset (equivalent to the
-/// original behaviour).  Prefer [`needs_renewal_at_with_domain_offset`] when a
-/// domain name is available so that multiple certs spread their renewals across
-/// the window.
-#[allow(dead_code)]
-pub fn needs_renewal_at(not_after_unix: i64, now_unix: i64, window_days: u64) -> bool {
-    needs_renewal_at_with_domain_offset(not_after_unix, now_unix, window_days, "")
-}
-
 /// Returns `true` if the certificate for `domain` should be renewed.
 ///
 /// The nominal renewal window starts `window_days * 86400` seconds before
@@ -33,6 +21,9 @@ pub fn needs_renewal_at(not_after_unix: i64, now_unix: i64, window_days: u64) ->
 /// - Without offset every domain triggers renewal at `E − 30d`.
 /// - With offset domain `"a.example"` might trigger at `E − 30d + 4h`,
 ///   `"b.example"` at `E − 30d + 11h`, etc.
+///
+/// An empty `domain` (e.g. mis-configured `domains: []`) yields a zero offset
+/// and the unspread behaviour, equivalent to a non-jittered window.
 pub fn needs_renewal_at_with_domain_offset(
     not_after_unix: i64,
     now_unix: i64,
@@ -51,7 +42,10 @@ pub fn needs_renewal_at_with_domain_offset(
 }
 
 /// FNV-1a 64-bit hash of a UTF-8 string.
-fn fnv1a(s: &str) -> u64 {
+///
+/// Exposed at `pub(crate)` so tests in sibling modules can replicate the
+/// per-domain offset without re-implementing the constants.
+pub(crate) fn fnv1a(s: &str) -> u64 {
     const OFFSET_BASIS: u64 = 14_695_981_039_346_656_037;
     const PRIME: u64 = 1_099_511_628_211;
     s.bytes()
@@ -74,8 +68,20 @@ mod tests {
     #[test]
     fn renewal_window_logic() {
         let now = 1_000_000;
-        assert!(needs_renewal_at(now + 5 * 86_400, now, 30));
-        assert!(!needs_renewal_at(now + 100 * 86_400, now, 30));
+        // Inside the 30-day window → renew.
+        assert!(needs_renewal_at_with_domain_offset(
+            now + 5 * 86_400,
+            now,
+            30,
+            "",
+        ));
+        // Outside the 30-day window → don't renew.
+        assert!(!needs_renewal_at_with_domain_offset(
+            now + 100 * 86_400,
+            now,
+            30,
+            "",
+        ));
     }
 
     #[test]
