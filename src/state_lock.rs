@@ -1,3 +1,21 @@
+//! Advisory single-writer lock on `state_dir`.
+//!
+//! Enforces the "single instance per `state_dir`" contract documented in
+//! the README. A second process attempting to acquire the lock fails
+//! immediately at bootstrap with an error naming the holding PID — rather
+//! than silently racing on `cert.pem`, `key.pem`, `account.json`, and
+//! `backoff.json`.
+//!
+//! The lock is a non-blocking `flock(LOCK_EX)` on `state_dir/.lock`. The
+//! file is kept open for the lifetime of `StateLock`; the kernel releases
+//! the flock when the fd closes — including on `kill -9` — so no manual
+//! cleanup is needed for stale lockfiles.
+//!
+//! The lockfile content (`pid=...\nstarted_at=...\n`) is best-effort
+//! debugging aid: it is read back into the contention error message so an
+//! operator sees *which* PID is holding the lock without having to
+//! `cat state_dir/.lock` separately.
+
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::Path;
