@@ -89,6 +89,19 @@ jobs:
         docker compose logs envoy pebble challtestsrv
         exit 1
 
+    - name: Fetch Pebble runtime root CA
+      run: |
+        set -euo pipefail
+        # Pebble generates a fresh root CA on every startup; pebble.minica.pem
+        # only signs Pebble's *own* TLS server cert, not the certs Pebble issues.
+        # Fetch the runtime root via the management API (:15000) so we can
+        # verify the issued chain and trust it from curl.
+        curl -sSf \
+          --cacert config/pebble-certs/pebble.minica.pem \
+          https://localhost:15000/roots/0 \
+          > /tmp/pebble.root.pem
+        test -s /tmp/pebble.root.pem
+
     - name: Verify certificate content and chain
       run: |
         set -euo pipefail
@@ -100,14 +113,14 @@ jobs:
         openssl x509 -in /tmp/example.test.cert.pem -noout \
           -ext subjectAltName | grep -q "DNS:example.test"
 
-        # Certificate must chain to Pebble's CA.
+        # Certificate must chain to Pebble's runtime root CA.
         # Pebble returns leaf + intermediate in the PEM chain; extract the
         # leaf cert first so openssl verify can treat the rest as untrusted
         # intermediates.
         openssl x509 -in /tmp/example.test.cert.pem > /tmp/example.test.leaf.pem
         test -s /tmp/example.test.leaf.pem
         openssl verify \
-          -CAfile config/pebble-certs/pebble.minica.pem \
+          -CAfile /tmp/pebble.root.pem \
           -untrusted /tmp/example.test.cert.pem \
           /tmp/example.test.leaf.pem
 
@@ -115,7 +128,7 @@ jobs:
       run: |
         set -euo pipefail
         RESP=$(curl -sSf \
-          --cacert config/pebble-certs/pebble.minica.pem \
+          --cacert /tmp/pebble.root.pem \
           --resolve example.test:8443:127.0.0.1 \
           https://example.test:8443/)
         echo "Response: ${RESP}"
