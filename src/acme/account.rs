@@ -160,7 +160,10 @@ pub async fn load_or_create_account(
     };
 
     let bytes = serde_json::to_vec_pretty(&credentials)?;
-    tokio::fs::write(path, bytes).await?;
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || crate::atomic_write::write_atomic(&path, &bytes, true))
+        .await
+        .map_err(std::io::Error::other)??;
     Ok(account)
 }
 

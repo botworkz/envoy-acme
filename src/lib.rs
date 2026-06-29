@@ -5,6 +5,7 @@
 // ignored for code generated inside the macro.
 #![allow(unpredictable_function_pointer_comparisons)]
 mod acme;
+mod atomic_write;
 mod bootstrap;
 mod cert_sink;
 mod challenge_store;

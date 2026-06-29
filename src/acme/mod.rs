@@ -217,8 +217,18 @@ impl AcmeStateMachine {
     async fn persist_bundle(&self, bundle: &CertBundle) -> Result<(), AcmeError> {
         let cert_path = self.config.state_dir.join(CERT_FILE);
         let key_path = self.config.state_dir.join(KEY_FILE);
-        tokio::fs::write(cert_path, &bundle.cert_pem).await?;
-        tokio::fs::write(key_path, &bundle.key_pem).await?;
+        let cert_pem = bundle.cert_pem.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::atomic_write::write_atomic(&cert_path, &cert_pem, false)
+        })
+        .await
+        .map_err(std::io::Error::other)??;
+        let key_pem = bundle.key_pem.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::atomic_write::write_atomic(&key_path, &key_pem, true)
+        })
+        .await
+        .map_err(std::io::Error::other)??;
         Ok(())
     }
 
@@ -255,7 +265,9 @@ async fn load_backoff(state_dir: &Path) -> BackoffState {
 async fn persist_backoff(state_dir: &Path, state: &BackoffState) -> Result<(), AcmeError> {
     let path = state_dir.join(BACKOFF_FILE);
     let bytes = serde_json::to_vec(state)?;
-    tokio::fs::write(path, bytes).await?;
+    tokio::task::spawn_blocking(move || crate::atomic_write::write_atomic(&path, &bytes, false))
+        .await
+        .map_err(std::io::Error::other)??;
     Ok(())
 }
 
