@@ -184,6 +184,8 @@ fn duration_to_seconds(duration: Duration) -> u64 {
         return 0;
     }
 
+    // Envoy's histogram API accepts integer values here, so record whole seconds
+    // and round fractional durations up into the next second bucket.
     duration
         .as_secs()
         .saturating_add(u64::from(duration.subsec_nanos() > 0))
