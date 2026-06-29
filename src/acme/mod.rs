@@ -432,7 +432,82 @@ impl AcmeStateMachine {
             return Ok(None);
         }
 
+        // Validate SANs and extract the cert's SPKI DER for the key-consistency
+        // check below.  Both checks operate on the parsed certificate, so we do
+        // them inside a scope to satisfy the borrow checker (the parsed cert
+        // borrows from cert_pem).
+        let cert_spki_der: Vec<u8> = {
+            let (_, pem_doc) = x509_parser::pem::parse_x509_pem(&cert_pem)
+                .map_err(|e| AcmeError::OrderFailed(format!("cert.pem PEM parse failed: {e}")))?;
+            let cert = pem_doc
+                .parse_x509()
+                .map_err(|e| AcmeError::OrderFailed(format!("cert.pem X.509 parse failed: {e}")))?;
+
+            // ── SAN coverage ────────────────────────────────────────────────
+            let cert_dns_names: std::collections::HashSet<String> = cert
+                .subject_alternative_name()
+                .ok()
+                .flatten()
+                .map(|ext| {
+                    ext.value
+                        .general_names
+                        .iter()
+                        .filter_map(|gn| {
+                            if let x509_parser::extensions::GeneralName::DNSName(name) = gn {
+                                Some(name.to_lowercase())
+                            } else {
+                                None
+                            }
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            let configured_lc: Vec<String> = self
+                .config
+                .domains
+                .iter()
+                .map(|d| d.to_ascii_lowercase())
+                .collect();
+
+            let missing: Vec<&str> = configured_lc
+                .iter()
+                .zip(self.config.domains.iter())
+                .filter(|(lc, _)| !cert_dns_names.contains(lc.as_str()))
+                .map(|(_, orig)| orig.as_str())
+                .collect();
+
+            if !missing.is_empty() {
+                let reason = format!(
+                    "cert SANs missing configured domain(s): {}",
+                    missing.join(", ")
+                );
+                warn!(domain = %domain, reason = %reason, "cached bundle invalid; will re-issue");
+                return Ok(None);
+            }
+
+            // ── SPKI extraction (used for key consistency below) ─────────────
+            cert.subject_pki.raw.to_vec()
+        };
+
         let key_pem = tokio::fs::read(&key_path).await?;
+
+        // ── Key↔cert consistency ─────────────────────────────────────────────
+        {
+            let key_str = std::str::from_utf8(&key_pem)
+                .map_err(|_| AcmeError::OrderFailed("key.pem is not valid UTF-8".into()))?;
+            let key_pair = rcgen::KeyPair::from_pem(key_str)
+                .map_err(|e| AcmeError::OrderFailed(format!("key.pem parse failed: {e}")))?;
+            if key_pair.public_key_der() != cert_spki_der {
+                warn!(
+                    domain = %domain,
+                    reason = "key.pem public key does not match cert.pem",
+                    "cached bundle invalid; will re-issue"
+                );
+                return Ok(None);
+            }
+        }
+
         let not_after = renewal::cert_not_after_unix(&cert_pem)?;
         Ok(Some((CertBundle { cert_pem, key_pem }, not_after)))
     }
@@ -540,12 +615,20 @@ mod tests {
     }
 
     /// Generate a self-signed cert whose `not_after` is `not_after_unix`.
-    fn generate_cert(not_after_unix: i64) -> (Vec<u8>, Vec<u8>) {
+    ///
+    /// `sans` is the list of DNS Subject Alternative Names to embed.  Pass the
+    /// configured `domains` when the cert will be loaded through
+    /// `load_cached_bundle` so that the SAN coverage check passes.
+    fn generate_cert(not_after_unix: i64, sans: &[&str]) -> (Vec<u8>, Vec<u8>) {
         let key = KeyPair::generate().unwrap();
         let mut params = CertificateParams::default();
         let not_after = time::OffsetDateTime::from_unix_timestamp(not_after_unix).unwrap();
         params.not_before = not_after - Duration::from_secs(90 * 86_400);
         params.not_after = not_after;
+        params.subject_alt_names = sans
+            .iter()
+            .map(|s| rcgen::SanType::DnsName((*s).try_into().unwrap()))
+            .collect();
         let cert = params.self_signed(&key).unwrap();
         (cert.pem().into_bytes(), key.serialize_pem().into_bytes())
     }
@@ -563,7 +646,7 @@ mod tests {
         let renewal_window_days = 10u64;
         let now_unix = time::OffsetDateTime::now_utc().unix_timestamp();
         let not_after = now_unix + 30 * 86_400;
-        let (cert_pem, key_pem) = generate_cert(not_after);
+        let (cert_pem, key_pem) = generate_cert(not_after, &["a.example.test"]);
         std::fs::write(tmp.path().join("cert.pem"), cert_pem).unwrap();
         std::fs::write(tmp.path().join("key.pem"), key_pem).unwrap();
 
@@ -605,7 +688,7 @@ mod tests {
     fn inspect_state_returns_invalid_when_key_missing() {
         let tmp = tempfile::tempdir().unwrap();
         let now_unix = time::OffsetDateTime::now_utc().unix_timestamp();
-        let (cert_pem, _) = generate_cert(now_unix + 90 * 86_400);
+        let (cert_pem, _) = generate_cert(now_unix + 90 * 86_400, &["a.example.test"]);
         std::fs::write(tmp.path().join("cert.pem"), cert_pem).unwrap();
 
         let summary = inspect_state(tmp.path(), "example.test", 10);
@@ -636,7 +719,7 @@ mod tests {
     fn inspect_state_returns_invalid_when_key_read_fails() {
         let tmp = tempfile::tempdir().unwrap();
         let now_unix = time::OffsetDateTime::now_utc().unix_timestamp();
-        let (cert_pem, _) = generate_cert(now_unix + 90 * 86_400);
+        let (cert_pem, _) = generate_cert(now_unix + 90 * 86_400, &["a.example.test"]);
         std::fs::write(tmp.path().join("cert.pem"), cert_pem).unwrap();
         std::fs::create_dir(tmp.path().join("key.pem")).unwrap();
 
@@ -653,7 +736,7 @@ mod tests {
     fn inspect_state_returns_invalid_when_cert_expired() {
         let tmp = tempfile::tempdir().unwrap();
         let now_unix = time::OffsetDateTime::now_utc().unix_timestamp();
-        let (cert_pem, key_pem) = generate_cert(now_unix - 86_400);
+        let (cert_pem, key_pem) = generate_cert(now_unix - 86_400, &["a.example.test"]);
         std::fs::write(tmp.path().join("cert.pem"), cert_pem).unwrap();
         std::fs::write(tmp.path().join("key.pem"), key_pem).unwrap();
 
@@ -752,7 +835,7 @@ mod tests {
         let now_unix = 1_000_000i64;
         // Cert expires 90 days from now; 30-day window → not in window yet.
         let not_after = now_unix + 90 * 86_400;
-        let (cert_pem, key_pem) = generate_cert(not_after);
+        let (cert_pem, key_pem) = generate_cert(not_after, &["a.example.test"]);
         std::fs::write(tmp.path().join("cert.pem"), &cert_pem).unwrap();
         std::fs::write(tmp.path().join("key.pem"), &key_pem).unwrap();
         std::fs::write(tmp.path().join(SENTINEL_FILE), sha256_hex(&cert_pem)).unwrap();
@@ -790,13 +873,13 @@ mod tests {
         let now_unix = 1_000_000i64;
         // Cert expires 10 days from now; 30-day window → inside window.
         let not_after = now_unix + 10 * 86_400;
-        let (cert_pem, key_pem) = generate_cert(not_after);
+        let (cert_pem, key_pem) = generate_cert(not_after, &["a.example.test"]);
         std::fs::write(tmp.path().join("cert.pem"), &cert_pem).unwrap();
         std::fs::write(tmp.path().join("key.pem"), &key_pem).unwrap();
         std::fs::write(tmp.path().join(SENTINEL_FILE), sha256_hex(&cert_pem)).unwrap();
 
         let new_not_after = now_unix + 90 * 86_400;
-        let (new_cert, new_key) = generate_cert(new_not_after);
+        let (new_cert, new_key) = generate_cert(new_not_after, &["a.example.test"]);
 
         let sink = std::sync::Arc::new(MockCertSink::default());
         let sink_clone = sink.clone();
@@ -828,7 +911,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let now_unix = 1_000_000i64;
         let new_not_after = now_unix + 90 * 86_400;
-        let (new_cert, new_key) = generate_cert(new_not_after);
+        let (new_cert, new_key) = generate_cert(new_not_after, &["a.example.test"]);
 
         let sink = std::sync::Arc::new(MockCertSink::default());
 
@@ -870,7 +953,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let now_unix = 1_000_000i64;
         let new_not_after = now_unix + 90 * 86_400;
-        let (new_cert, new_key) = generate_cert(new_not_after);
+        let (new_cert, new_key) = generate_cert(new_not_after, &["a.example.test"]);
 
         let sink = std::sync::Arc::new(MockCertSink::default());
         let sink_clone = sink.clone();
@@ -1031,7 +1114,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let now_unix = 1_000_000i64;
         let new_not_after = now_unix + 90 * 86_400;
-        let (new_cert, new_key) = generate_cert(new_not_after);
+        let (new_cert, new_key) = generate_cert(new_not_after, &["a.example.test"]);
 
         struct DevNull;
         impl CertSink for DevNull {
@@ -1075,7 +1158,7 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         let now_unix = time::OffsetDateTime::now_utc().unix_timestamp();
-        let (cert_pem, key_pem) = generate_cert(now_unix + 90 * 86_400);
+        let (cert_pem, key_pem) = generate_cert(now_unix + 90 * 86_400, &["a.example.test"]);
         let bundle = CertBundle {
             cert_pem: cert_pem.clone(),
             key_pem: key_pem.clone(),
@@ -1125,7 +1208,7 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         let now_unix = time::OffsetDateTime::now_utc().unix_timestamp();
-        let (cert_pem, key_pem) = generate_cert(now_unix + 90 * 86_400);
+        let (cert_pem, key_pem) = generate_cert(now_unix + 90 * 86_400, &["a.example.test"]);
         let bundle = CertBundle { cert_pem, key_pem };
         let sm = AcmeStateMachine::new_with_issuer(
             test_config(tmp.path()),
@@ -1140,6 +1223,118 @@ mod tests {
 
         let loaded = sm.load_cached_bundle().await.unwrap();
         assert!(loaded.is_none());
+    }
+
+    // ────────────────────────────────────────────────────────────────────────
+    // SAN-coverage and key-consistency tests
+    // ────────────────────────────────────────────────────────────────────────
+
+    // Helper: returns a DevNull sink wrapped in a Box.
+    fn dev_null_sink() -> Box<dyn crate::cert_sink::CertSink> {
+        struct DevNull;
+        impl CertSink for DevNull {
+            fn publish(&self, _: &str, _: &CertBundle) -> Result<(), SinkError> {
+                Ok(())
+            }
+        }
+        Box::new(DevNull)
+    }
+
+    /// A cert whose SANs cover MORE than the configured domains is still
+    /// accepted (configured is a strict subset of cert SANs).
+    #[tokio::test]
+    async fn load_cached_bundle_ok_when_cert_sans_are_superset_of_configured() {
+        let tmp = tempfile::tempdir().unwrap();
+        let now_unix = time::OffsetDateTime::now_utc().unix_timestamp();
+        // Cert covers two names; test_config only requests "a.example.test".
+        let (cert_pem, key_pem) = generate_cert(
+            now_unix + 90 * 86_400,
+            &["a.example.test", "b.example.test"],
+        );
+        let bundle = CertBundle { cert_pem, key_pem };
+        let sm = AcmeStateMachine::new_with_issuer(
+            test_config(tmp.path()),
+            dev_null_sink(),
+            Box::new(MockIssuer::with_results(vec![])),
+        );
+
+        sm.persist_bundle(&bundle).await.unwrap();
+        let loaded = sm.load_cached_bundle().await.unwrap();
+
+        assert!(loaded.is_some(), "superset SANs should be accepted");
+    }
+
+    /// A cert whose SANs cover FEWER names than configured must be rejected.
+    #[tokio::test]
+    #[traced_test]
+    async fn load_cached_bundle_none_when_cert_sans_missing_configured_domain() {
+        let tmp = tempfile::tempdir().unwrap();
+        let now_unix = time::OffsetDateTime::now_utc().unix_timestamp();
+
+        // Build a config that requires two domains.
+        let mut cfg = test_config(tmp.path());
+        cfg.domains = vec!["a.example.test".into(), "b.example.test".into()];
+
+        // But the cert only covers one of them.
+        let (cert_pem, key_pem) = generate_cert(now_unix + 90 * 86_400, &["a.example.test"]);
+        let bundle = CertBundle {
+            cert_pem: cert_pem.clone(),
+            key_pem,
+        };
+
+        // Write cert and key files manually with a sentinel matching the cert hash.
+        std::fs::write(tmp.path().join(CERT_FILE), &cert_pem).unwrap();
+        std::fs::write(tmp.path().join(KEY_FILE), bundle.key_pem.clone()).unwrap();
+        std::fs::write(tmp.path().join(SENTINEL_FILE), sha256_hex(&cert_pem)).unwrap();
+
+        let sm = AcmeStateMachine::new_with_issuer(
+            cfg,
+            dev_null_sink(),
+            Box::new(MockIssuer::with_results(vec![])),
+        );
+
+        let loaded = sm.load_cached_bundle().await.unwrap();
+        assert!(
+            loaded.is_none(),
+            "cert missing a configured SAN must be rejected"
+        );
+        assert!(
+            logs_contain("cert SANs missing configured domain(s)"),
+            "warn log must name the missing domain(s)"
+        );
+    }
+
+    /// A cert whose public key does not match the stored private key must be
+    /// rejected with an appropriate log message.
+    #[tokio::test]
+    #[traced_test]
+    async fn load_cached_bundle_none_when_key_does_not_match_cert() {
+        let tmp = tempfile::tempdir().unwrap();
+        let now_unix = time::OffsetDateTime::now_utc().unix_timestamp();
+
+        let (cert_pem, _cert_key_pem) = generate_cert(now_unix + 90 * 86_400, &["a.example.test"]);
+        // Generate a *different* key pair — public key won't match cert.
+        let (_other_cert_pem, mismatched_key_pem) =
+            generate_cert(now_unix + 90 * 86_400, &["a.example.test"]);
+
+        // Write the cert with a mismatched key file; the sentinel only covers
+        // the cert bytes, so it still passes the hash check.
+        std::fs::write(tmp.path().join(CERT_FILE), &cert_pem).unwrap();
+        std::fs::write(tmp.path().join(KEY_FILE), &mismatched_key_pem).unwrap();
+        std::fs::write(tmp.path().join(SENTINEL_FILE), sha256_hex(&cert_pem)).unwrap();
+
+        let sm = AcmeStateMachine::new_with_issuer(
+            test_config(tmp.path()),
+            dev_null_sink(),
+            Box::new(MockIssuer::with_results(vec![])),
+        );
+
+        let loaded = sm.load_cached_bundle().await.unwrap();
+        assert!(loaded.is_none(), "cert/key mismatch must cause rejection");
+        assert!(
+            logs_contain("key.pem public key does not match cert.pem"),
+            "warn log must describe the key mismatch"
+        );
     }
 
     // ────────────────────────────────────────────────────────────────────────
@@ -1189,7 +1384,7 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         let not_after = time::OffsetDateTime::now_utc().unix_timestamp() + 90 * 86_400;
-        let (cert_pem, key_pem) = generate_cert(not_after);
+        let (cert_pem, key_pem) = generate_cert(not_after, &["a.example.test"]);
 
         let sink = std::sync::Arc::new(MockCertSink::default());
 
@@ -1290,7 +1485,7 @@ mod tests {
     async fn publish_uses_default_domain_when_domains_empty() {
         let tmp = tempfile::tempdir().unwrap();
         let now_unix = 1_000_000i64;
-        let (cert_pem, key_pem) = generate_cert(now_unix + 90 * 86_400);
+        let (cert_pem, key_pem) = generate_cert(now_unix + 90 * 86_400, &["a.example.test"]);
 
         let sink = std::sync::Arc::new(MockCertSink::default());
 
@@ -1318,7 +1513,7 @@ mod tests {
     async fn successful_issuance_emits_heartbeat_when_due() {
         let tmp = tempfile::tempdir().unwrap();
         let now_unix = 1_000_000i64;
-        let (cert_pem, key_pem) = generate_cert(now_unix + 90 * 86_400);
+        let (cert_pem, key_pem) = generate_cert(now_unix + 90 * 86_400, &["a.example.test"]);
 
         struct DevNull;
         impl CertSink for DevNull {
@@ -1377,7 +1572,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let now_unix = 1_000_000i64;
         let not_after = now_unix + 90 * 86_400;
-        let (cert_pem, key_pem) = generate_cert(not_after);
+        let (cert_pem, key_pem) = generate_cert(not_after, &["a.example.test"]);
         std::fs::write(tmp.path().join("cert.pem"), &cert_pem).unwrap();
         std::fs::write(tmp.path().join("key.pem"), &key_pem).unwrap();
         std::fs::write(tmp.path().join(SENTINEL_FILE), sha256_hex(&cert_pem)).unwrap();
@@ -1416,7 +1611,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let now_unix = 1_000_000i64;
         let not_after = now_unix + 90 * 86_400;
-        let (cert_pem, key_pem) = generate_cert(not_after);
+        let (cert_pem, key_pem) = generate_cert(not_after, &["a.example.test"]);
         std::fs::write(tmp.path().join("cert.pem"), &cert_pem).unwrap();
         std::fs::write(tmp.path().join("key.pem"), &key_pem).unwrap();
         std::fs::write(tmp.path().join(SENTINEL_FILE), sha256_hex(&cert_pem)).unwrap();
@@ -1448,7 +1643,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let now_unix = 1_000_000i64;
         let not_after = now_unix + 90 * 86_400;
-        let (cert_pem, key_pem) = generate_cert(not_after);
+        let (cert_pem, key_pem) = generate_cert(not_after, &["a.example.test"]);
         std::fs::write(tmp.path().join("cert.pem"), &cert_pem).unwrap();
         std::fs::write(tmp.path().join("key.pem"), &key_pem).unwrap();
         std::fs::write(tmp.path().join(SENTINEL_FILE), sha256_hex(&cert_pem)).unwrap();
@@ -1531,7 +1726,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let now_unix = 1_000_000i64;
         let not_after = now_unix + 90 * 86_400; // outside the 30-day window
-        let (cert_pem, key_pem) = generate_cert(not_after);
+        let (cert_pem, key_pem) = generate_cert(not_after, &["a.example.test"]);
         std::fs::write(tmp.path().join("cert.pem"), &cert_pem).unwrap();
         std::fs::write(tmp.path().join("key.pem"), &key_pem).unwrap();
         std::fs::write(tmp.path().join(SENTINEL_FILE), sha256_hex(&cert_pem)).unwrap();
