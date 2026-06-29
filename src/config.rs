@@ -1,3 +1,4 @@
+use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -19,7 +20,7 @@ pub struct Config {
 /// `directory_uri` only when using `custom`; for `staging` and `production`
 /// the URL is fixed and `directory_uri` may be omitted (or set to the
 /// expected value for documentation purposes).
-#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum DirectoryProfile {
     Staging,
@@ -91,7 +92,19 @@ impl TryFrom<RawAcmeConfig> for AcmeConfig {
                     "acme.directory_uri is required when directory_profile is 'custom'".to_string(),
                 )
             }
-            (Some(DirectoryProfile::Custom), Some(uri)) => uri.to_string(),
+            (Some(DirectoryProfile::Custom), Some(uri)) => {
+                if uri == LE_STAGING_URL {
+                    return Err(format!(
+                        "acme.directory_profile is 'custom' but directory_uri is the Let's Encrypt staging URL '{LE_STAGING_URL}'. Use directory_profile: staging instead."
+                    ));
+                }
+                if uri == LE_PRODUCTION_URL {
+                    return Err(format!(
+                        "acme.directory_profile is 'custom' but directory_uri is the Let's Encrypt production URL '{LE_PRODUCTION_URL}'. Use directory_profile: production instead."
+                    ));
+                }
+                uri.to_string()
+            }
         };
 
         Ok(AcmeConfig {
@@ -108,7 +121,7 @@ impl TryFrom<RawAcmeConfig> for AcmeConfig {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(try_from = "RawAcmeConfig")]
 pub struct AcmeConfig {
     /// Which ACME directory profile to use.  When set, `directory_uri` is
@@ -133,6 +146,37 @@ pub struct AcmeConfig {
     /// renewal.  Defaults to 60.  Set lower in integration environments.
     #[serde(default = "default_tick_seconds")]
     pub tick_seconds: u64,
+}
+
+impl Serialize for AcmeConfig {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut state = serializer.serialize_struct("AcmeConfig", 9)?;
+        if let Some(profile) = self.directory_profile {
+            let profile = match profile {
+                DirectoryProfile::Staging => "staging",
+                DirectoryProfile::Production => "production",
+                DirectoryProfile::Custom => "custom",
+            };
+            state.serialize_field("directory_profile", profile)?;
+        }
+        match self.directory_profile {
+            Some(DirectoryProfile::Staging) | Some(DirectoryProfile::Production) => {}
+            None | Some(DirectoryProfile::Custom) => {
+                state.serialize_field("directory_uri", &self.directory_uri)?;
+            }
+        }
+        state.serialize_field("directory_ca_file", &self.directory_ca_file)?;
+        state.serialize_field("contact", &self.contact)?;
+        state.serialize_field("domains", &self.domains)?;
+        state.serialize_field("renewal_window_days", &self.renewal_window_days)?;
+        state.serialize_field("state_dir", &self.state_dir)?;
+        state.serialize_field("cert_sink", &self.cert_sink)?;
+        state.serialize_field("tick_seconds", &self.tick_seconds)?;
+        state.end()
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -316,6 +360,32 @@ acme:
         let cfg = Config::from_bytes(raw.as_bytes()).expect("yaml parse");
         assert_eq!(cfg.acme.directory_profile, Some(DirectoryProfile::Custom));
         assert_eq!(cfg.acme.directory_uri, "https://pebble:14000/dir");
+    }
+
+    #[test]
+    fn custom_profile_with_le_staging_uri_rejected() {
+        let raw = base_yaml(&format!(
+            "directory_profile: custom\n  directory_uri: {LE_STAGING_URL}"
+        ));
+        let err = Config::from_bytes(raw.as_bytes()).expect_err("should reject LE staging URL");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("custom") && msg.contains("staging"),
+            "error should mention custom and staging, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn custom_profile_with_le_production_uri_rejected() {
+        let raw = base_yaml(&format!(
+            "directory_profile: custom\n  directory_uri: {LE_PRODUCTION_URL}"
+        ));
+        let err = Config::from_bytes(raw.as_bytes()).expect_err("should reject LE production URL");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("custom") && msg.contains("production"),
+            "error should mention custom and production, got: {msg}"
+        );
     }
 
     // ── profile=custom, no directory_uri → error ─────────────────────────────
