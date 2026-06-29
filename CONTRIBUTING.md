@@ -8,6 +8,18 @@ cargo clippy --all-targets -- -D warnings
 cargo test
 ```
 
+## Coverage
+
+Coverage uses `cargo-tarpaulin`.
+
+```bash
+cargo install cargo-tarpaulin --locked
+make coverage
+```
+
+The HTML report is written to `target/tarpaulin/tarpaulin-report.html`.
+Coverage is currently unit-test only; the docker compose / Envoy integration flow is not instrumented.
+
 ## End-to-end stack
 
 ```bash
