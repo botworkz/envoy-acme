@@ -496,6 +496,7 @@ mod tests {
         assert_eq!(sink_clone.call_count(), 1);
     }
 
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn successful_issuance_emits_success_metrics() {
         let _guard = crate::metrics::test_lock();
@@ -591,6 +592,7 @@ mod tests {
         assert_eq!(sink_clone.call_count(), 1, "cert published after backoff");
     }
 
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn rate_limited_failure_emits_failure_metrics() {
         let _guard = crate::metrics::test_lock();
