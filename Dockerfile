@@ -38,4 +38,12 @@ COPY --from=build /sds-placeholder/ /var/lib/envoy-acme/certs/
 COPY envoy/bootstrap.yaml /etc/envoy/bootstrap.yaml
 COPY config/example.yaml /etc/envoy/envoy-acme.yaml
 COPY config/pebble-certs /etc/envoy/pebble-certs
+# FilesystemSink and AcmeStateMachine write account.json, cert.pem,
+# key.pem, and the SDS secret yaml under /var/lib/envoy-acme. The COPY
+# steps above create that tree owned by root:root, but the envoy image
+# runs as the unprivileged envoy user (uid 101). Hand the whole subtree
+# to envoy so writes don't EACCES.
+USER root
+RUN chown -R 101:101 /var/lib/envoy-acme
+USER envoy
 CMD ["envoy", "-c", "/etc/envoy/bootstrap.yaml", "--service-cluster", "envoy-acme-demo"]
