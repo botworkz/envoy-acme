@@ -73,7 +73,7 @@ fn new_bootstrap_extension_config(
 fn new_http_filter_config<EC: http::EnvoyHttpFilterConfig, EHF: http::EnvoyHttpFilter>(
     _envoy: &mut EC,
     _name: &str,
-    _config: &[u8],
+    config: &[u8],
 ) -> Option<Box<dyn http::HttpFilterConfig<EHF>>> {
-    Some(Box::new(AcmeHttpFilterConfig))
+    Some(Box::new(AcmeHttpFilterConfig::from_bytes(config)))
 }

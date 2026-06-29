@@ -101,6 +101,39 @@ Notable config options in `acme:`:
 - `directory_ca_file` (optional): path to a PEM CA bundle to trust when connecting to the ACME directory (e.g. Pebble's self-signed CA in integration tests). Omit to use the system native roots.
 - `tick_seconds` (default `60`): how often the renewal state machine timer fires. Set lower in integration environments.
 
+## HTTP filter config (`filter_config`)
+
+The `acme_http` HTTP filter requires a separate `filter_config` entry in the
+Envoy listener that lists the domains the filter should respond to.  The HTTP
+filter only intercepts `GET /.well-known/acme-challenge/<token>` requests whose
+`Host` / `:authority` header matches one of the configured domains (comparison
+is case-insensitive and port-stripped).  Requests from any other virtual host
+fall through to the rest of the filter chain unchanged.
+
+> **Note:** the Envoy listener that carries this filter must be reachable from
+> the internet (or the ACME CA's validation network) on the same domain names
+> listed here.  HTTP-01 validation works by having the CA send an HTTP request
+> to `http://<domain>/.well-known/acme-challenge/<token>`, so the listener
+> **must** be reachable on port 80 for at least the configured domains.  This
+> is implicit in how HTTP-01 works, but worth spelling out: if the listener is
+> only reachable on a private network or on a domain not listed in `domains`,
+> certificate issuance will silently fail at the CA validation step.
+
+Example (matching `envoy/bootstrap.yaml`):
+
+```yaml
+filter_config:
+  "@type": type.googleapis.com/google.protobuf.StringValue
+  value: |
+    domains:
+      - example.com
+```
+
+The `domains` list must contain the same values as `acme.domains` in the
+bootstrap extension config.  Requests whose `Host` / `:authority` header is
+not in this list are passed through to the next filter unchanged, so the HTTP
+filter is safe to place in front of other virtual hosts on a shared listener.
+
 ## Docker image
 
 The published image runs as the `envoy` user (uid `101` in the upstream `envoyproxy/envoy` base image).
