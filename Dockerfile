@@ -38,4 +38,11 @@ COPY --from=build /sds-placeholder/ /var/lib/envoy-acme/certs/
 COPY envoy/bootstrap.yaml /etc/envoy/bootstrap.yaml
 COPY config/example.yaml /etc/envoy/envoy-acme.yaml
 COPY config/pebble-certs /etc/envoy/pebble-certs
+# Hand /var/lib/envoy-acme to uid 101 so the unprivileged envoy user
+# can write account.json, cert.pem, key.pem and *.secret.yaml. The COPY
+# above leaves the tree owned by root:root which would EACCES on first
+# tick.
+USER root
+RUN chown -R 101:101 /var/lib/envoy-acme
+USER envoy
 CMD ["envoy", "-c", "/etc/envoy/bootstrap.yaml", "--service-cluster", "envoy-acme-demo"]
