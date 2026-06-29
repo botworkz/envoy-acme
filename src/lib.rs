@@ -13,6 +13,8 @@ mod config;
 mod errors;
 mod http_filter;
 mod runtime;
+#[cfg(test)]
+mod test_stubs;
 
 use envoy_proxy_dynamic_modules_rust_sdk::*;
 
