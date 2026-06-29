@@ -26,6 +26,7 @@ parking_lot = "0.12"
 x509-parser = "0.16"
 time = "0.3"
 base64 = "0.22"
+rand = "0.8"
 tempfile = "3"
 # Custom HTTPS client for user-supplied CA cert (e.g. Pebble in integration tests).
 hyper = "1"

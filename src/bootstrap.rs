@@ -6,6 +6,7 @@ use envoy_proxy_dynamic_modules_rust_sdk::{
     EnvoyBootstrapExtensionConfig,
 };
 use parking_lot::Mutex;
+use rand::Rng;
 
 use crate::config::Config;
 use crate::errors::RuntimeError;
@@ -54,7 +55,11 @@ impl BootstrapExtensionConfig for AcmeBootstrapConfig {
         if let Err(e) = self.runtime.tick() {
             envoy_proxy_dynamic_modules_rust_sdk::envoy_log_error!("envoy-acme: tick failed: {e}");
         }
-        timer.enable(std::time::Duration::from_secs(self.tick_seconds));
+        // Add ±10 % random jitter to the next tick interval so that multiple
+        // instances that started at the same moment don't stay in lockstep.
+        let jitter: f64 = rand::thread_rng().gen_range(0.9..=1.1);
+        let jittered = ((self.tick_seconds as f64) * jitter) as u64;
+        timer.enable(std::time::Duration::from_secs(jittered));
     }
 
     fn on_http_callout_done(
