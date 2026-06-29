@@ -13,11 +13,11 @@ bootstrap_extensions:
       "@type": type.googleapis.com/google.protobuf.StringValue
       value: |
         acme:
-          directory_cluster: acme_directory
-          directory_uri: https://pebble:14000/dir
-          # NOTE: directory_uri and acme_directory cluster above still reference
-          # the Pebble test endpoint. Replace with the real ACME directory URL
-          # (e.g. https://acme-v02.api.letsencrypt.org/directory) before production use.
+          # Defaults to Let's Encrypt **staging** so that an image started with
+          # the baked-in bootstrap cannot accidentally hit prod rate limits.
+          # Switch to https://acme-v02.api.letsencrypt.org/directory once
+          # staging issuance is verified.
+          directory_uri: https://acme-staging-v02.api.letsencrypt.org/directory
           contact: mailto:admin@example.test
           domains:
           - example.test
@@ -118,27 +118,3 @@ static_resources:
               socket_address:
                 address: upstream
                 port_value: 8080
-
-  # acme_directory is reserved for a future send_http_callout-based ACME
-  # implementation (see TODO in src/acme/order.rs).  instant-acme currently
-  # owns its own HTTPS transport, so this cluster is not actively used.
-  - name: acme_directory
-    connect_timeout: 2s
-    type: STRICT_DNS
-    load_assignment:
-      cluster_name: acme_directory
-      endpoints:
-      - lb_endpoints:
-        - endpoint:
-            address:
-              socket_address:
-                address: pebble
-                port_value: 14000
-    transport_socket:
-      name: envoy.transport_sockets.tls
-      typed_config:
-        "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
-        common_tls_context:
-          validation_context:
-            trusted_ca:
-              filename: /etc/envoy/pebble-certs/pebble.minica.pem
