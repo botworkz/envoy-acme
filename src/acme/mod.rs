@@ -23,6 +23,7 @@ const CERT_FILE: &str = "cert.pem";
 const KEY_FILE: &str = "key.pem";
 const SENTINEL_FILE: &str = "bundle.ok";
 const BACKOFF_FILE: &str = "backoff.json";
+const SECONDS_PER_DAY: i64 = 86_400;
 
 fn sha256_hex(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
@@ -33,6 +34,90 @@ fn sha256_hex(bytes: &[u8]) -> String {
         out.push(HEX[(byte & 0x0f) as usize] as char);
     }
     out
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum StateSummary {
+    NoCertCached,
+    CertCached {
+        not_after_unix: u64,
+        days_until_renewal: i64,
+    },
+    CertCachedButInvalid {
+        reason: String,
+    },
+}
+
+pub(crate) fn inspect_state(
+    state_dir: &Path,
+    domain: &str,
+    renewal_window_days: u64,
+) -> StateSummary {
+    let cert_path = state_dir.join(CERT_FILE);
+    if !cert_path.exists() {
+        return StateSummary::NoCertCached;
+    }
+
+    let key_path = state_dir.join(KEY_FILE);
+    if !key_path.exists() {
+        return StateSummary::CertCachedButInvalid {
+            reason: format!(
+                "missing key file for domain {domain}: {}",
+                key_path.display()
+            ),
+        };
+    }
+
+    let cert_pem = match std::fs::read(&cert_path) {
+        Ok(cert) => cert,
+        Err(e) => {
+            return StateSummary::CertCachedButInvalid {
+                reason: format!("failed to read cert file for domain {domain}: {e}"),
+            };
+        }
+    };
+
+    if let Err(e) = std::fs::read(&key_path) {
+        return StateSummary::CertCachedButInvalid {
+            reason: format!("failed to read key file for domain {domain}: {e}"),
+        };
+    }
+
+    let not_after = match renewal::cert_not_after_unix(&cert_pem) {
+        Ok(v) => v,
+        Err(e) => {
+            return StateSummary::CertCachedButInvalid {
+                reason: format!("cert parse failed for domain {domain}: {e}"),
+            };
+        }
+    };
+
+    let not_after_unix = match u64::try_from(not_after) {
+        Ok(v) => v,
+        Err(_) => {
+            return StateSummary::CertCachedButInvalid {
+                reason: "cert has invalid not_after timestamp".to_string(),
+            };
+        }
+    };
+
+    let now_unix = time::OffsetDateTime::now_utc().unix_timestamp();
+    if not_after <= now_unix {
+        let not_after_iso = time::OffsetDateTime::from_unix_timestamp(not_after)
+            .map(|dt| dt.to_string())
+            .unwrap_or_else(|_| format!("unix:{not_after}"));
+        return StateSummary::CertCachedButInvalid {
+            reason: format!("cert expired for domain {domain} at {not_after_iso}"),
+        };
+    }
+
+    let days_until_expiry = (not_after - now_unix) / SECONDS_PER_DAY;
+    let days_until_renewal = days_until_expiry - (renewal_window_days as i64);
+
+    StateSummary::CertCached {
+        not_after_unix,
+        days_until_renewal,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -403,7 +488,58 @@ mod tests {
         (cert.pem().into_bytes(), key.serialize_pem().into_bytes())
     }
 
-    // ── MockCertSink ────────────────────────────────────────────────────────
+    #[test]
+    fn inspect_state_returns_no_cert_when_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let summary = inspect_state(tmp.path(), "example.test", 10);
+        assert_eq!(summary, StateSummary::NoCertCached);
+    }
+
+    #[test]
+    fn inspect_state_returns_cached_when_valid() {
+        let tmp = tempfile::tempdir().unwrap();
+        let renewal_window_days = 10u64;
+        let now_unix = time::OffsetDateTime::now_utc().unix_timestamp();
+        let not_after = now_unix + 30 * 86_400;
+        let (cert_pem, key_pem) = generate_cert(not_after);
+        std::fs::write(tmp.path().join("cert.pem"), cert_pem).unwrap();
+        std::fs::write(tmp.path().join("key.pem"), key_pem).unwrap();
+
+        let summary = inspect_state(tmp.path(), "example.test", renewal_window_days);
+        match summary {
+            StateSummary::CertCached {
+                not_after_unix,
+                days_until_renewal,
+            } => {
+                assert_eq!(not_after_unix as i64, not_after);
+                assert!(
+                    (19..=20).contains(&days_until_renewal),
+                    "days_until_renewal={days_until_renewal} not in expected range",
+                );
+            }
+            other => panic!("expected CertCached, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn inspect_state_returns_invalid_when_unparseable() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("cert.pem"), b"not a cert").unwrap();
+        std::fs::write(tmp.path().join("key.pem"), b"not a key").unwrap();
+
+        let summary = inspect_state(tmp.path(), "example.test", 10);
+        match summary {
+            StateSummary::CertCachedButInvalid { reason } => {
+                assert!(
+                    reason.to_ascii_lowercase().contains("parse"),
+                    "reason should mention parse failure, got: {reason}"
+                );
+            }
+            other => panic!("expected CertCachedButInvalid, got {other:?}"),
+        }
+    }
+
+    // ── MockCertSink ─────────────────────────────────────────────────────────
 
     struct MockCertSink {
         calls: Mutex<Vec<String>>,
