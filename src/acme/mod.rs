@@ -230,15 +230,18 @@ impl AcmeStateMachine {
             .first()
             .map(String::as_str)
             .unwrap_or("");
-        if !sentinel_path.exists() {
-            warn!(
-                domain = %domain,
-                reason = "sentinel missing",
-                "cached bundle invalid; will re-issue"
-            );
-            return Ok(None);
-        }
-        let sentinel = tokio::fs::read(&sentinel_path).await?;
+        let sentinel = match tokio::fs::read(&sentinel_path).await {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                warn!(
+                    domain = %domain,
+                    reason = "sentinel missing",
+                    "cached bundle invalid; will re-issue"
+                );
+                return Ok(None);
+            }
+            Err(e) => return Err(e.into()),
+        };
         let expected = sha256_hex(&cert_pem);
         if sentinel != expected.as_bytes() {
             warn!(
