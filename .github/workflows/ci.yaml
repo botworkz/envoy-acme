@@ -47,6 +47,41 @@ jobs:
     - uses: Swatinem/rust-cache@v2
     - run: cargo test
 
+  coverage:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+    - uses: actions/checkout@v4
+    - uses: dtolnay/rust-toolchain@stable
+    - uses: Swatinem/rust-cache@v2
+      with:
+        shared-key: coverage
+    - name: Install cargo-tarpaulin
+      id: tarpaulin_install
+      uses: taiki-e/install-action@v2
+      with:
+        tool: cargo-tarpaulin
+      continue-on-error: true
+    - name: Fallback install cargo-tarpaulin
+      if: steps.tarpaulin_install.outcome != 'success'
+      run: cargo install cargo-tarpaulin --locked
+    - name: Run unit test coverage
+      continue-on-error: true
+      run: |
+        cargo tarpaulin \
+          --workspace \
+          --timeout 180 \
+          --out Xml --out Html \
+          --output-dir target/tarpaulin \
+          --skip-clean
+    - name: Upload coverage report
+      uses: actions/upload-artifact@v4
+      with:
+        name: coverage-report
+        path: target/tarpaulin/
+        retention-days: 14
+        if-no-files-found: warn
+
   integration:
     runs-on: ubuntu-latest
     steps:
