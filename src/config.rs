@@ -125,10 +125,10 @@ impl TryFrom<RawAcmeConfig> for AcmeConfig {
             "https" => {}
             "http" if raw.directory_profile == Some(DirectoryProfile::Custom) => {
                 if !raw.allow_insecure_directory.unwrap_or(false) {
-                    return Err(
-                        "acme.directory_uri uses plain HTTP; set acme.allow_insecure_directory: true \
-                        to permit this (custom profile only)".to_string(),
-                    );
+                    return Err("acme.directory_uri uses plain HTTP; set \
+                        acme.allow_insecure_directory: true to permit this \
+                        (only valid for directory_profile: custom)"
+                        .to_string());
                 }
                 tracing::warn!(
                     directory_uri = %directory_uri,
@@ -137,11 +137,16 @@ impl TryFrom<RawAcmeConfig> for AcmeConfig {
                 );
             }
             "http" => {
-                return Err(
+                let profile = match raw.directory_profile {
+                    Some(DirectoryProfile::Staging) => "staging",
+                    Some(DirectoryProfile::Production) => "production",
+                    None => "unset (no directory_profile)",
+                    Some(DirectoryProfile::Custom) => unreachable!(),
+                };
+                return Err(format!(
                     "acme.directory_uri must use https:// scheme; plain HTTP is not permitted \
-                    for staging or production profiles"
-                        .to_string(),
-                );
+                    for directory_profile: {profile}"
+                ));
             }
             other => {
                 return Err(format!(
@@ -678,8 +683,8 @@ acme:
         let err = Config::from_bytes(raw.as_bytes()).expect_err("http no-profile URI should fail");
         let msg = err.to_string();
         assert!(
-            msg.contains("https"),
-            "error should mention https, got: {msg}"
+            msg.contains("https") && msg.contains("unset"),
+            "error should mention https and the unset profile, got: {msg}"
         );
     }
 
