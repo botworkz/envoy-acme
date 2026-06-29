@@ -1,0 +1,145 @@
+node:
+  id: envoy-acme-demo
+  cluster: envoy-acme-demo
+
+bootstrap_extensions:
+- name: envoy.bootstrap.dynamic_modules
+  typed_config:
+    "@type": type.googleapis.com/envoy.extensions.bootstrap.dynamic_modules.v3.DynamicModuleBootstrapExtension
+    dynamic_module_config:
+      name: envoy_acme
+    extension_name: acme_bootstrap
+    extension_config:
+      "@type": type.googleapis.com/google.protobuf.StringValue
+      value: |
+        acme:
+          directory_cluster: acme_directory
+          directory_uri: https://pebble:14000/dir
+          # Trust Pebble's self-signed CA so instant-acme can verify the
+          # directory TLS certificate.  Remove in production environments.
+          directory_ca_file: /etc/envoy/pebble-certs/pebble.minica.pem
+          contact: mailto:admin@example.test
+          domains:
+          - example.test
+          renewal_window_days: 30
+          # Low tick interval for the integration smoke test; raise in production.
+          tick_seconds: 5
+          state_dir: /var/lib/envoy-acme
+          cert_sink:
+            type: filesystem
+            cert_dir: /var/lib/envoy-acme/certs
+            layout: per_domain
+        log:
+          level: info
+
+static_resources:
+  listeners:
+  - name: http
+    address:
+      socket_address:
+        address: 0.0.0.0
+        port_value: 80
+    filter_chains:
+    - filters:
+      - name: envoy.filters.network.http_connection_manager
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+          stat_prefix: ingress_http
+          route_config:
+            name: local_route
+            virtual_hosts:
+            - name: backend
+              domains: ["*"]
+              routes:
+              - match:
+                  prefix: "/"
+                route:
+                  cluster: demo_upstream
+          http_filters:
+          - name: envoy.extensions.filters.http.dynamic_modules
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.http.dynamic_modules.v3.DynamicModuleFilter
+              dynamic_module_config:
+                name: envoy_acme
+              filter_name: acme_http
+              filter_config:
+                "@type": type.googleapis.com/google.protobuf.StringValue
+                value: "{}"
+          - name: envoy.filters.http.router
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+
+  - name: https
+    address:
+      socket_address:
+        address: 0.0.0.0
+        port_value: 443
+    filter_chains:
+    - transport_socket:
+        name: envoy.transport_sockets.tls
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.DownstreamTlsContext
+          common_tls_context:
+            tls_certificate_sds_secret_configs:
+            - name: example_test_tls
+              sds_config:
+                path_config_source:
+                  path: /var/lib/envoy-acme/certs/example.test.secret.yaml
+
+      filters:
+      - name: envoy.filters.network.http_connection_manager
+        typed_config:
+          "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+          stat_prefix: ingress_https
+          route_config:
+            name: local_route_https
+            virtual_hosts:
+            - name: backend
+              domains: ["*"]
+              routes:
+              - match:
+                  prefix: "/"
+                route:
+                  cluster: demo_upstream
+          http_filters:
+          - name: envoy.filters.http.router
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+
+  clusters:
+  - name: demo_upstream
+    connect_timeout: 1s
+    type: STRICT_DNS
+    load_assignment:
+      cluster_name: demo_upstream
+      endpoints:
+      - lb_endpoints:
+        - endpoint:
+            address:
+              socket_address:
+                address: upstream
+                port_value: 8080
+
+  # acme_directory is reserved for a future send_http_callout-based ACME
+  # implementation (see TODO in src/acme/order.rs).  instant-acme currently
+  # owns its own HTTPS transport, so this cluster is not actively used.
+  - name: acme_directory
+    connect_timeout: 2s
+    type: STRICT_DNS
+    load_assignment:
+      cluster_name: acme_directory
+      endpoints:
+      - lb_endpoints:
+        - endpoint:
+            address:
+              socket_address:
+                address: pebble
+                port_value: 14000
+    transport_socket:
+      name: envoy.transport_sockets.tls
+      typed_config:
+        "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
+        common_tls_context:
+          validation_context:
+            trusted_ca:
+              filename: /etc/envoy/pebble-certs/pebble.minica.pem

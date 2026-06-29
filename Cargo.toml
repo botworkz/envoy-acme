@@ -1,0 +1,39 @@
+[package]
+name = "envoy_acme"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.78"
+license = "Apache-2.0"
+repository = "https://github.com/botworkz/envoy-acme"
+description = "Envoy ACME dynamic module prototype"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# Envoy v1.38.x SDK path (dynamic modules Rust SDK is consumed from Envoy repo tags).
+envoy-proxy-dynamic-modules-rust-sdk = { git = "https://github.com/envoyproxy/envoy", rev = "f1dd21b16c244bda00edfb5ffce577e12d0d2ec2", package = "envoy-proxy-dynamic-modules-rust-sdk" }
+instant-acme = "0.7"
+rcgen = "0.13"
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["rt", "macros", "time", "sync", "fs"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+parking_lot = "0.12"
+x509-parser = "0.16"
+time = "0.3"
+base64 = "0.22"
+tempfile = "3"
+# Custom HTTPS client for user-supplied CA cert (e.g. Pebble in integration tests).
+hyper = "1"
+hyper-util = { version = "0.1", features = ["client-legacy", "tokio"] }
+hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "ring", "tls12"] }
+rustls = "0.23"
+rustls-pemfile = "2"
+http-body-util = "0.1"
+
+[dev-dependencies]
+mockall = "0.13"
