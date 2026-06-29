@@ -38,4 +38,6 @@ pub enum AcmeError {
 pub enum RuntimeError {
     #[error("runtime thread already stopped")]
     Stopped,
+    #[error("{0}")]
+    Bootstrap(String),
 }

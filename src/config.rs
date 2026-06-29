@@ -107,6 +107,46 @@ impl TryFrom<RawAcmeConfig> for AcmeConfig {
             }
         };
 
+        if raw.tick_seconds == 0 {
+            return Err("acme.tick_seconds must be >= 1 (got 0)".to_string());
+        }
+
+        if raw.domains.is_empty() {
+            return Err("acme.domains must contain at least one domain".to_string());
+        }
+        for (i, value) in raw.domains.iter().enumerate() {
+            let reason = if value.is_empty() {
+                "must be non-empty"
+            } else if value.starts_with('.') {
+                "must not start with '.'"
+            } else if value.chars().any(char::is_whitespace) {
+                "must not contain whitespace"
+            } else {
+                continue;
+            };
+            return Err(format!(
+                "acme.domains[{i}]: invalid domain {value:?}: {reason}"
+            ));
+        }
+
+        if raw.contact.trim().is_empty() {
+            return Err("acme.contact must be non-empty".to_string());
+        }
+
+        if !(1..=365).contains(&raw.renewal_window_days) {
+            return Err(format!(
+                "acme.renewal_window_days must be between 1 and 365 (got {})",
+                raw.renewal_window_days
+            ));
+        }
+
+        if raw.cert_sink.sink_type != "filesystem" {
+            return Err(format!(
+                "acme.cert_sink.type {:?} is not supported; only \"filesystem\" is currently supported",
+                raw.cert_sink.sink_type
+            ));
+        }
+
         Ok(AcmeConfig {
             directory_profile: raw.directory_profile,
             directory_uri,
@@ -399,6 +439,103 @@ acme:
         assert!(
             msg.contains("directory_uri") || msg.contains("custom"),
             "error should mention directory_uri or custom, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn rejects_tick_seconds_zero() {
+        let raw = base_yaml("directory_uri: https://example.invalid/directory\n  tick_seconds: 0");
+        let err = Config::from_bytes(raw.as_bytes()).expect_err("tick_seconds=0 should fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("tick_seconds") && msg.contains(">= 1"),
+            "error should mention tick_seconds lower bound, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn rejects_empty_domains_list() {
+        let raw = base_yaml("directory_uri: https://example.invalid/directory")
+            .replace("domains: [example.test]", "domains: []");
+        let err = Config::from_bytes(raw.as_bytes()).expect_err("empty domains should fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("domains") && msg.contains("at least one"),
+            "error should mention domains non-empty, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn rejects_empty_domain_entry() {
+        let raw = base_yaml("directory_uri: https://example.invalid/directory")
+            .replace("domains: [example.test]", r#"domains: [""]"#);
+        let err = Config::from_bytes(raw.as_bytes()).expect_err("empty domain should fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("domains[0]") && msg.contains("non-empty"),
+            "error should mention invalid empty domain, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn rejects_domain_starting_with_dot() {
+        let raw = base_yaml("directory_uri: https://example.invalid/directory")
+            .replace("domains: [example.test]", "domains: [.example.test]");
+        let err = Config::from_bytes(raw.as_bytes()).expect_err("leading dot domain should fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("domains[0]") && msg.contains("start"),
+            "error should mention leading dot domain, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn rejects_domain_with_whitespace() {
+        let raw = base_yaml("directory_uri: https://example.invalid/directory")
+            .replace("domains: [example.test]", r#"domains: ["example .test"]"#);
+        let err = Config::from_bytes(raw.as_bytes()).expect_err("whitespace domain should fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("domains[0]") && msg.contains("whitespace"),
+            "error should mention whitespace domain, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn rejects_empty_contact() {
+        let raw = base_yaml("directory_uri: https://example.invalid/directory")
+            .replace("contact: mailto:admin@example.test", "contact: \"   \"");
+        let err = Config::from_bytes(raw.as_bytes()).expect_err("empty contact should fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("contact") && msg.contains("non-empty"),
+            "error should mention non-empty contact, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn rejects_renewal_window_days_out_of_range() {
+        let raw = base_yaml("directory_uri: https://example.invalid/directory")
+            .replace("renewal_window_days: 10", "renewal_window_days: 0");
+        let err =
+            Config::from_bytes(raw.as_bytes()).expect_err("renewal_window_days=0 should fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("renewal_window_days") && msg.contains("between 1 and 365"),
+            "error should mention renewal_window_days range, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn rejects_unsupported_cert_sink_type() {
+        let raw = base_yaml("directory_uri: https://example.invalid/directory")
+            .replace("type: filesystem", "type: s3");
+        let err =
+            Config::from_bytes(raw.as_bytes()).expect_err("unsupported sink type should fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("cert_sink.type") && msg.contains("filesystem"),
+            "error should mention cert_sink.type support, got: {msg}"
         );
     }
 }
