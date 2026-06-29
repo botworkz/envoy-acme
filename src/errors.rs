@@ -36,6 +36,8 @@ pub enum AcmeError {
 
 #[derive(Debug, Error)]
 pub enum RuntimeError {
+    #[error("io error: {0}")]
+    Io(#[from] std::io::Error),
     #[error("runtime thread already stopped")]
     Stopped,
 }
