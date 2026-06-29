@@ -47,13 +47,26 @@ make down
 
 See:
 - `config/example.yaml`
-- `envoy/bootstrap.yaml`
+- `envoy/bootstrap.yaml` — production-shaped bootstrap baked into the Docker image
+- `envoy/bootstrap.test.yaml` — integration-test variant used by `compose.yaml` (mounts over the baked-in file at runtime)
 
 Config bytes are parsed as JSON first, then YAML.
 
 Notable config options in `acme:`:
 - `directory_ca_file` (optional): path to a PEM CA bundle to trust when connecting to the ACME directory (e.g. Pebble's self-signed CA in integration tests). Omit to use the system native roots.
 - `tick_seconds` (default `60`): how often the renewal state machine timer fires. Set lower in integration environments.
+
+## Docker image
+
+The published image runs as the `envoy` user (uid `101` in the upstream `envoyproxy/envoy` base image).
+
+To override the uid at build time (e.g. when rebasing on a base image where the `envoy` user has a different uid):
+
+```bash
+docker build --build-arg ENVOY_UID=1001 .
+```
+
+The `ENVOY_UID` build argument is provided as an override surface; the `chown` step uses the named `envoy` user directly.
 
 ## Integration test topology
 
