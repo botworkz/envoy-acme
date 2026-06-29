@@ -1,13 +1,42 @@
+use std::future::Future;
 use std::path::Path;
+use std::pin::Pin;
 
 use http_body_util::Full;
 use hyper::body::Bytes;
+use hyper::{header, Request};
 use hyper_util::client::legacy::Client as HyperClient;
 use hyper_util::rt::TokioExecutor;
 use instant_acme::{Account, AccountCredentials, HttpClient, NewAccount};
 use rustls::{ClientConfig, RootCertStore};
 
 use crate::errors::AcmeError;
+
+/// Wrapper that injects a `User-Agent` header into every request before
+/// delegating to an inner [`HttpClient`].
+///
+/// RFC 8555 §6.1 requires clients to supply a `User-Agent` on all requests.
+/// Pebble enforces this and returns a problem document (with no `newNonce`
+/// field) when the header is absent; instant-acme 0.7 does not set one.
+struct WithUserAgent(Box<dyn HttpClient>);
+
+impl HttpClient for WithUserAgent {
+    fn request(
+        &self,
+        mut req: Request<Full<Bytes>>,
+    ) -> Pin<Box<dyn Future<Output = Result<instant_acme::BytesResponse, instant_acme::Error>> + Send>>
+    {
+        req.headers_mut()
+            .entry(header::USER_AGENT)
+            .or_insert_with(|| {
+                header::HeaderValue::from_static(concat!(
+                    "envoy-acme/",
+                    env!("CARGO_PKG_VERSION")
+                ))
+            });
+        self.0.request(req)
+    }
+}
 
 /// Build an instant-acme [`HttpClient`] that trusts `ca_path` as its sole root
 /// CA.  Used in environments (e.g. integration tests) where the ACME directory
@@ -40,7 +69,7 @@ fn build_custom_client(ca_path: &Path) -> Result<Box<dyn HttpClient>, AcmeError>
     let client: HyperClient<_, Full<Bytes>> =
         HyperClient::builder(TokioExecutor::new()).build(connector);
 
-    Ok(Box::new(client))
+    Ok(Box::new(WithUserAgent(Box::new(client))))
 }
 
 pub async fn load_or_create_account(

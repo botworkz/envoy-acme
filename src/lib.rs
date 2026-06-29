@@ -1,4 +1,9 @@
 #![allow(clippy::incompatible_msrv)]
+// The `declare_all_init_functions!` macro from envoy-proxy-dynamic-modules-rust-sdk
+// performs function-pointer comparisons internally for duplicate-registration detection;
+// the lint cannot be suppressed per-invocation because #[allow] on a macro call is
+// ignored for code generated inside the macro.
+#![allow(unpredictable_function_pointer_comparisons)]
 mod acme;
 mod bootstrap;
 mod cert_sink;
