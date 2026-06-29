@@ -39,15 +39,14 @@ impl StateLock {
 
         // Lock acquired. Write our identity. Truncate first so a stale longer
         // string from a previous holder doesn't get partially overwritten.
-        let mut file_w = &file;
-        file_w.set_len(0)?;
+        file.set_len(0)?;
         let ts = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        writeln!(file_w, "pid={}", std::process::id())?;
-        writeln!(file_w, "started_at={ts}")?;
-        file_w.sync_all()?;
+        writeln!(&file, "pid={}", std::process::id())?;
+        writeln!(&file, "started_at={ts}")?;
+        file.sync_all()?;
 
         Ok(Self { _file: file })
     }
