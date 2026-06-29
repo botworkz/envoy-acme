@@ -38,3 +38,4 @@ http-body-util = "0.1"
 
 [dev-dependencies]
 mockall = "0.13"
+tracing-test = "0.2"
