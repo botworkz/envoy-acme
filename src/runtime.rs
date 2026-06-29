@@ -1,7 +1,10 @@
 use std::any::Any;
 use std::panic::AssertUnwindSafe;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
+#[cfg(test)]
+use std::time::{Duration, Instant};
 
 use tokio::runtime::Builder;
 use tokio::sync::mpsc;
@@ -16,18 +19,26 @@ enum Command {
     Start,
     Tick,
     Shutdown,
+    #[cfg(test)]
+    PanicForTest,
 }
 
 #[derive(Clone)]
 pub struct RuntimeBridge {
     tx: Arc<mpsc::UnboundedSender<Command>>,
+    runtime_alive: Arc<AtomicBool>,
+    #[cfg(test)]
+    thread_handle: Arc<parking_lot::Mutex<Option<std::thread::JoinHandle<()>>>>,
 }
 
 impl RuntimeBridge {
     pub fn new(config: Config) -> Self {
         let (tx, mut rx) = mpsc::unbounded_channel::<Command>();
+        let runtime_alive = Arc::new(AtomicBool::new(false));
+        let runtime_alive_thread = runtime_alive.clone();
 
-        thread::spawn(move || {
+        let _handle = thread::spawn(move || {
+            runtime_alive_thread.store(true, Ordering::Release);
             // enable_all so the IO driver is present for the rustls/hyper
             // HTTPS transport used by instant-acme. Without IO, the first
             // connect attempt would fail and the runtime would drop.
@@ -37,6 +48,7 @@ impl RuntimeBridge {
                     envoy_proxy_dynamic_modules_rust_sdk::envoy_log_error!(
                         "envoy-acme: failed to create tokio runtime: {e}"
                     );
+                    runtime_alive_thread.store(false, Ordering::Release);
                     return;
                 }
             };
@@ -67,10 +79,13 @@ impl RuntimeBridge {
                                 sm.clear_challenges();
                                 break;
                             }
+                            #[cfg(test)]
+                            Command::PanicForTest => panic!("panic injected for runtime test"),
                         }
                     }
                 });
             }));
+            runtime_alive_thread.store(false, Ordering::Release);
 
             if let Err(panic) = result {
                 let msg = panic_message(panic.as_ref());
@@ -80,7 +95,12 @@ impl RuntimeBridge {
             }
         });
 
-        Self { tx: Arc::new(tx) }
+        Self {
+            tx: Arc::new(tx),
+            runtime_alive,
+            #[cfg(test)]
+            thread_handle: Arc::new(parking_lot::Mutex::new(Some(_handle))),
+        }
     }
 
     pub fn start(&self) -> Result<(), RuntimeError> {
@@ -100,6 +120,24 @@ impl RuntimeBridge {
             .send(Command::Shutdown)
             .map_err(|_| RuntimeError::Stopped)
     }
+
+    pub fn is_alive(&self) -> bool {
+        self.runtime_alive.load(Ordering::Acquire)
+    }
+
+    #[cfg(test)]
+    fn panic_for_test(&self) -> Result<(), RuntimeError> {
+        self.tx
+            .send(Command::PanicForTest)
+            .map_err(|_| RuntimeError::Stopped)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn join_for_test(&self) {
+        if let Some(handle) = self.thread_handle.lock().take() {
+            let _ = handle.join();
+        }
+    }
 }
 
 fn panic_message(panic: &(dyn Any + Send)) -> String {
@@ -109,5 +147,95 @@ fn panic_message(panic: &(dyn Any + Send)) -> String {
         s.clone()
     } else {
         "<non-string panic payload>".to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+
+    use super::*;
+    use crate::config::{AcmeConfig, CertSinkConfig, Config, Layout, LogConfig};
+    use crate::errors::RuntimeError;
+
+    static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(1);
+
+    fn test_config() -> Config {
+        let id = NEXT_TEST_ID.fetch_add(1, AtomicOrdering::Relaxed);
+        let base = std::env::temp_dir().join(format!("envoy-acme-runtime-test-{id}"));
+        let state_dir = base.join("state");
+        let cert_dir = base.join("certs");
+
+        Config {
+            acme: AcmeConfig {
+                directory_profile: None,
+                directory_uri: "https://acme.invalid/directory".into(),
+                directory_ca_file: None,
+                contact: "mailto:test@example.test".into(),
+                domains: vec!["example.test".into()],
+                renewal_window_days: 30,
+                state_dir,
+                cert_sink: CertSinkConfig {
+                    sink_type: "filesystem".into(),
+                    cert_dir,
+                    layout: Layout::PerDomain,
+                },
+                tick_seconds: 60,
+            },
+            log: LogConfig::default(),
+        }
+    }
+
+    fn wait_for(deadline: Instant, condition: impl Fn() -> bool) -> bool {
+        while Instant::now() < deadline {
+            if condition() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        condition()
+    }
+
+    #[test]
+    fn runtime_alive_true_after_start() {
+        let runtime = RuntimeBridge::new(test_config());
+        assert!(wait_for(
+            Instant::now() + Duration::from_millis(200),
+            || runtime.is_alive()
+        ));
+        runtime.shutdown().expect("shutdown should send");
+        runtime.join_for_test();
+    }
+
+    #[test]
+    fn runtime_alive_false_after_shutdown() {
+        let runtime = RuntimeBridge::new(test_config());
+        assert!(wait_for(
+            Instant::now() + Duration::from_millis(200),
+            || runtime.is_alive()
+        ));
+
+        runtime.shutdown().expect("shutdown should send");
+        runtime.join_for_test();
+
+        assert!(!runtime.is_alive());
+    }
+
+    #[test]
+    fn runtime_alive_false_after_panic() {
+        let runtime = RuntimeBridge::new(test_config());
+        assert!(wait_for(
+            Instant::now() + Duration::from_millis(200),
+            || runtime.is_alive()
+        ));
+
+        runtime.panic_for_test().expect("panic command should send");
+
+        assert!(wait_for(
+            Instant::now() + Duration::from_millis(500),
+            || !runtime.is_alive()
+        ));
+        assert!(matches!(runtime.tick(), Err(RuntimeError::Stopped)));
+        runtime.join_for_test();
     }
 }
