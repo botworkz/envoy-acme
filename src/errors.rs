@@ -36,8 +36,8 @@ pub enum AcmeError {
 
 #[derive(Debug, Error)]
 pub enum RuntimeError {
-    #[error("io error: {0}")]
-    Io(#[from] std::io::Error),
+    #[error("failed to acquire state_dir lock: {0}")]
+    LockAcquisition(#[from] std::io::Error),
     #[error("runtime thread already stopped")]
     Stopped,
 }
