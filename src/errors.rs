@@ -40,4 +40,6 @@ pub enum RuntimeError {
     LockAcquisition(#[from] std::io::Error),
     #[error("runtime thread already stopped")]
     Stopped,
+    #[error("{0}")]
+    Bootstrap(String),
 }
