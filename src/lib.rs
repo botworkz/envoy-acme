@@ -12,6 +12,7 @@ mod challenge_store;
 mod config;
 mod errors;
 mod http_filter;
+mod metrics;
 mod runtime;
 
 use envoy_proxy_dynamic_modules_rust_sdk::*;

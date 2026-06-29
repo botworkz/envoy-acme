@@ -10,6 +10,7 @@ use rand::Rng;
 
 use crate::config::Config;
 use crate::errors::RuntimeError;
+use crate::metrics;
 use crate::runtime::RuntimeBridge;
 
 pub struct AcmeBootstrapConfig {
@@ -23,6 +24,7 @@ impl AcmeBootstrapConfig {
         envoy_config: &mut dyn EnvoyBootstrapExtensionConfig,
         config: Config,
     ) -> Result<Self, RuntimeError> {
+        metrics::init(envoy_config).map_err(|e| RuntimeError::Metrics(format!("{e:?}")))?;
         let tick_seconds = config.acme.tick_seconds;
         let runtime = RuntimeBridge::new(config);
         let timer = envoy_config.new_timer();
@@ -60,6 +62,14 @@ impl BootstrapExtensionConfig for AcmeBootstrapConfig {
         let jitter: f64 = rand::thread_rng().gen_range(0.9..=1.1);
         let jittered = ((self.tick_seconds as f64) * jitter) as u64;
         timer.enable(std::time::Duration::from_secs(jittered));
+    }
+
+    fn on_scheduled(
+        &self,
+        envoy_extension_config: &mut dyn EnvoyBootstrapExtensionConfig,
+        event_id: u64,
+    ) {
+        metrics::on_scheduled(envoy_extension_config, event_id);
     }
 
     fn on_http_callout_done(

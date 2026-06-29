@@ -5,6 +5,7 @@ pub mod renewal;
 
 use std::path::Path;
 use std::pin::Pin;
+use std::time::Instant;
 
 use tracing::{debug, error, info, instrument};
 
@@ -12,6 +13,7 @@ use crate::cert_sink::{CertBundle, CertSink};
 use crate::challenge_store;
 use crate::config::AcmeConfig;
 use crate::errors::AcmeError;
+use crate::metrics;
 
 use backoff::BackoffState;
 
@@ -131,6 +133,15 @@ impl AcmeStateMachine {
             .map(String::as_str)
             .unwrap_or("");
 
+        metrics::set_consecutive_failures(domain, self.backoff.consecutive_failures);
+        metrics::set_next_retry_at(
+            domain,
+            self.backoff
+                .next_retry_at
+                .and_then(|ts| u64::try_from(ts).ok())
+                .unwrap_or(0),
+        );
+
         // ── Rate-limit backoff guard ─────────────────────────────────────
         if self.backoff.is_blocked(now_unix) {
             let next_retry_at = self.backoff.next_retry_at.unwrap_or(0);
@@ -151,29 +162,44 @@ impl AcmeStateMachine {
                 domain,
             ) {
                 self.last_not_after_unix = Some(not_after);
+                if let Ok(not_after_unix) = u64::try_from(not_after) {
+                    metrics::set_cert_not_after(domain, not_after_unix);
+                }
                 self.publish("cached", &bundle)?;
                 return Ok(());
             }
         }
 
         // ── Certificate issuance ─────────────────────────────────────────
+        let issuance_started = Instant::now();
         match self.issuer.issue(&self.config).await {
             Ok(bundle) => {
+                let elapsed = issuance_started.elapsed();
                 self.persist_bundle(&bundle).await?;
                 self.publish("issued", &bundle)?;
 
                 match renewal::cert_not_after_unix(&bundle.cert_pem) {
-                    Ok(v) => self.last_not_after_unix = Some(v),
+                    Ok(v) => {
+                        self.last_not_after_unix = Some(v);
+                        if let Ok(not_after_unix) = u64::try_from(v) {
+                            metrics::set_cert_not_after(domain, not_after_unix);
+                        }
+                    }
                     Err(e) => error!(%e, "unable to parse not_after from issued certificate"),
                 }
 
                 // Successful issuance clears any rate-limit back-off.
                 self.backoff.clear();
                 persist_backoff(&self.config.state_dir, &self.backoff).await?;
+                metrics::record_issuance_success(domain, elapsed);
+                metrics::set_consecutive_failures(domain, 0);
+                metrics::set_next_retry_at(domain, 0);
 
                 Ok(())
             }
             Err(e) => {
+                let elapsed = issuance_started.elapsed();
+                metrics::record_issuance_failure(domain, elapsed);
                 if matches!(
                     backoff::classify_acme_error(&e),
                     backoff::ErrorClass::RateLimited
@@ -187,7 +213,11 @@ impl AcmeStateMachine {
                         consecutive_failures = self.backoff.consecutive_failures,
                         "rate-limited by ACME server, backing off"
                     );
+                    if let Ok(next_retry_at_unix) = u64::try_from(next_retry_at) {
+                        metrics::set_next_retry_at(domain, next_retry_at_unix);
+                    }
                 }
+                metrics::set_consecutive_failures(domain, self.backoff.consecutive_failures);
                 // Non-rate-limit errors propagate as-is; the caller logs them
                 // and retries on the next ordinary tick interval.
                 Err(e)
@@ -277,6 +307,7 @@ async fn persist_backoff(state_dir: &Path, state: &BackoffState) -> Result<(), A
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
     use std::sync::Mutex;
     use std::time::Duration;
 
@@ -465,6 +496,48 @@ mod tests {
         assert_eq!(sink_clone.call_count(), 1);
     }
 
+    #[tokio::test]
+    async fn successful_issuance_emits_success_metrics() {
+        let _guard = crate::metrics::test_lock();
+        crate::metrics::reset_test_state();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let now_unix = 1_000_000i64;
+        let new_not_after = now_unix + 90 * 86_400;
+        let (new_cert, new_key) = generate_cert(new_not_after);
+
+        let sink = std::sync::Arc::new(MockCertSink::default());
+
+        struct ArcSink(std::sync::Arc<MockCertSink>);
+        impl CertSink for ArcSink {
+            fn publish(&self, name: &str, bundle: &CertBundle) -> Result<(), SinkError> {
+                self.0.publish(name, bundle)
+            }
+        }
+
+        let issuer = Box::new(MockIssuer::always_ok(new_cert, new_key));
+        let mut sm = AcmeStateMachine::new_with_issuer(
+            test_config(tmp.path()),
+            Box::new(ArcSink(sink)),
+            issuer,
+        );
+
+        sm.tick_at(now_unix).await.unwrap();
+
+        let metrics: HashSet<_> = crate::metrics::take_test_updates().into_iter().collect();
+        assert!(metrics.contains("envoy_acme_issuance_total:success"));
+        assert!(
+            metrics
+                .iter()
+                .any(|metric| metric.starts_with("envoy_acme_issuance_duration_seconds:"))
+        );
+        assert!(metrics.contains("envoy_acme_consecutive_failures:a.example.test:0"));
+        assert!(metrics.contains(&format!(
+            "envoy_acme_cert_not_after_seconds:a.example.test:{}",
+            new_not_after
+        )));
+    }
+
     // ─────────────────────────────────────────────────────────────────────────
     // Test 3 — rate-limited error: backoff persisted; next tick is a no-op;
     //           tick after backoff window retries
@@ -517,6 +590,54 @@ mod tests {
         // Tick 3 — after backoff → issuance succeeds.
         sm.tick_at(next_retry_at + 1).await.unwrap();
         assert_eq!(sink_clone.call_count(), 1, "cert published after backoff");
+    }
+
+    #[tokio::test]
+    async fn rate_limited_failure_emits_failure_metrics() {
+        let _guard = crate::metrics::test_lock();
+        crate::metrics::reset_test_state();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let now_unix = 1_000_000i64;
+
+        let sink = std::sync::Arc::new(MockCertSink::default());
+
+        struct ArcSink(std::sync::Arc<MockCertSink>);
+        impl CertSink for ArcSink {
+            fn publish(&self, name: &str, bundle: &CertBundle) -> Result<(), SinkError> {
+                self.0.publish(name, bundle)
+            }
+        }
+
+        let issuer = Box::new(MockIssuer::with_results(vec![Err(rate_limit_error())]));
+        let mut sm = AcmeStateMachine::new_with_issuer(
+            test_config(tmp.path()),
+            Box::new(ArcSink(sink)),
+            issuer,
+        );
+
+        assert!(sm.tick_at(now_unix).await.is_err());
+
+        let metrics: HashSet<_> = crate::metrics::take_test_updates().into_iter().collect();
+        assert!(metrics.contains("envoy_acme_issuance_total:failure"));
+        assert!(
+            metrics
+                .iter()
+                .any(|metric| metric.starts_with("envoy_acme_issuance_duration_seconds:"))
+        );
+        assert!(metrics.contains("envoy_acme_consecutive_failures:a.example.test:1"));
+
+        let next_retry_metric = metrics
+            .iter()
+            .find(|metric| metric.starts_with("envoy_acme_next_retry_at_seconds:a.example.test:"))
+            .expect("next_retry_at metric should be recorded");
+        let next_retry_at = next_retry_metric
+            .rsplit(':')
+            .next()
+            .unwrap()
+            .parse::<i64>()
+            .unwrap();
+        assert!(next_retry_at > now_unix);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
