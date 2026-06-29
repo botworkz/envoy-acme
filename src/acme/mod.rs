@@ -6,7 +6,8 @@ pub mod renewal;
 use std::path::Path;
 use std::pin::Pin;
 
-use tracing::{debug, error, info, instrument};
+use sha2::{Digest, Sha256};
+use tracing::{debug, error, info, instrument, warn};
 
 use crate::cert_sink::{CertBundle, CertSink};
 use crate::challenge_store;
@@ -18,7 +19,16 @@ use backoff::BackoffState;
 const ACCOUNT_FILE: &str = "account.json";
 const CERT_FILE: &str = "cert.pem";
 const KEY_FILE: &str = "key.pem";
+const SENTINEL_FILE: &str = "bundle.ok";
 const BACKOFF_FILE: &str = "backoff.json";
+
+fn hex_lower(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        out.push_str(&format!("{b:02x}"));
+    }
+    out
+}
 
 // ---------------------------------------------------------------------------
 // Issuer abstraction
@@ -204,12 +214,39 @@ impl AcmeStateMachine {
     async fn load_cached_bundle(&self) -> Result<Option<(CertBundle, i64)>, AcmeError> {
         let cert_path = self.config.state_dir.join(CERT_FILE);
         let key_path = self.config.state_dir.join(KEY_FILE);
+        let sentinel_path = self.config.state_dir.join(SENTINEL_FILE);
         if !cert_path.exists() || !key_path.exists() {
             return Ok(None);
         }
 
         let cert_pem = tokio::fs::read(&cert_path).await?;
         let key_pem = tokio::fs::read(&key_path).await?;
+        let domain = self
+            .config
+            .domains
+            .first()
+            .map(std::string::String::as_str)
+            .unwrap_or("default");
+        if !sentinel_path.exists() {
+            warn!(
+                domain = %domain,
+                reason = "sentinel missing",
+                "cached bundle invalid; will re-issue"
+            );
+            return Ok(None);
+        }
+
+        let sentinel = tokio::fs::read(&sentinel_path).await?;
+        let cert_hash = hex_lower(&Sha256::digest(&cert_pem));
+        if sentinel != cert_hash.as_bytes() {
+            warn!(
+                domain = %domain,
+                reason = "sentinel hash mismatch",
+                "cached bundle invalid; will re-issue"
+            );
+            return Ok(None);
+        }
+
         let not_after = renewal::cert_not_after_unix(&cert_pem)?;
         Ok(Some((CertBundle { cert_pem, key_pem }, not_after)))
     }
@@ -217,6 +254,7 @@ impl AcmeStateMachine {
     async fn persist_bundle(&self, bundle: &CertBundle) -> Result<(), AcmeError> {
         let cert_path = self.config.state_dir.join(CERT_FILE);
         let key_path = self.config.state_dir.join(KEY_FILE);
+        let sentinel_path = self.config.state_dir.join(SENTINEL_FILE);
         let cert_pem = bundle.cert_pem.clone();
         tokio::task::spawn_blocking(move || {
             crate::atomic_write::write_atomic(&cert_path, &cert_pem, false)
@@ -226,6 +264,12 @@ impl AcmeStateMachine {
         let key_pem = bundle.key_pem.clone();
         tokio::task::spawn_blocking(move || {
             crate::atomic_write::write_atomic(&key_path, &key_pem, true)
+        })
+        .await
+        .map_err(std::io::Error::other)??;
+        let cert_hash = hex_lower(&Sha256::digest(&bundle.cert_pem)).into_bytes();
+        tokio::task::spawn_blocking(move || {
+            crate::atomic_write::write_atomic(&sentinel_path, &cert_hash, false)
         })
         .await
         .map_err(std::io::Error::other)??;
@@ -401,8 +445,10 @@ mod tests {
         // Cert expires 90 days from now; 30-day window → not in window yet.
         let not_after = now_unix + 90 * 86_400;
         let (cert_pem, key_pem) = generate_cert(not_after);
-        std::fs::write(tmp.path().join("cert.pem"), &cert_pem).unwrap();
-        std::fs::write(tmp.path().join("key.pem"), &key_pem).unwrap();
+        std::fs::write(tmp.path().join(CERT_FILE), &cert_pem).unwrap();
+        std::fs::write(tmp.path().join(KEY_FILE), &key_pem).unwrap();
+        let cert_hash = hex_lower(&Sha256::digest(&cert_pem));
+        std::fs::write(tmp.path().join(SENTINEL_FILE), cert_hash).unwrap();
 
         let sink = std::sync::Arc::new(MockCertSink::default());
         let sink_clone = sink.clone();
@@ -438,8 +484,10 @@ mod tests {
         // Cert expires 10 days from now; 30-day window → inside window.
         let not_after = now_unix + 10 * 86_400;
         let (cert_pem, key_pem) = generate_cert(not_after);
-        std::fs::write(tmp.path().join("cert.pem"), &cert_pem).unwrap();
-        std::fs::write(tmp.path().join("key.pem"), &key_pem).unwrap();
+        std::fs::write(tmp.path().join(CERT_FILE), &cert_pem).unwrap();
+        std::fs::write(tmp.path().join(KEY_FILE), &key_pem).unwrap();
+        let cert_hash = hex_lower(&Sha256::digest(&cert_pem));
+        std::fs::write(tmp.path().join(SENTINEL_FILE), cert_hash).unwrap();
 
         let new_not_after = now_unix + 90 * 86_400;
         let (new_cert, new_key) = generate_cert(new_not_after);
@@ -620,6 +668,93 @@ mod tests {
             serde_json::from_slice(&std::fs::read(tmp.path().join("backoff.json")).unwrap())
                 .unwrap();
         assert_eq!(stored, BackoffState::default());
+    }
+
+    #[tokio::test]
+    async fn load_cached_bundle_ok_when_sentinel_matches() {
+        let tmp = tempfile::tempdir().unwrap();
+        let not_after = 1_000_000i64 + 90 * 86_400;
+        let (cert_pem, key_pem) = generate_cert(not_after);
+        let expected_cert = cert_pem.clone();
+        let expected_key = key_pem.clone();
+        let bundle = CertBundle { cert_pem, key_pem };
+
+        struct DevNull;
+        impl CertSink for DevNull {
+            fn publish(&self, _: &str, _: &CertBundle) -> Result<(), SinkError> {
+                Ok(())
+            }
+        }
+
+        let sm = AcmeStateMachine::new_with_issuer(
+            test_config(tmp.path()),
+            Box::new(DevNull),
+            Box::new(MockIssuer::with_results(vec![])),
+        );
+        sm.persist_bundle(&bundle).await.unwrap();
+
+        let cached = sm.load_cached_bundle().await.unwrap();
+        assert!(cached.is_some());
+        let (cached_bundle, _) = cached.unwrap();
+        assert_eq!(cached_bundle.cert_pem, expected_cert);
+        assert_eq!(cached_bundle.key_pem, expected_key);
+    }
+
+    #[tokio::test]
+    async fn load_cached_bundle_none_when_sentinel_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        tokio::fs::create_dir_all(tmp.path()).await.unwrap();
+        tokio::fs::write(tmp.path().join(CERT_FILE), b"cert-bytes")
+            .await
+            .unwrap();
+        tokio::fs::write(tmp.path().join(KEY_FILE), b"key-bytes")
+            .await
+            .unwrap();
+
+        struct DevNull;
+        impl CertSink for DevNull {
+            fn publish(&self, _: &str, _: &CertBundle) -> Result<(), SinkError> {
+                Ok(())
+            }
+        }
+
+        let sm = AcmeStateMachine::new_with_issuer(
+            test_config(tmp.path()),
+            Box::new(DevNull),
+            Box::new(MockIssuer::with_results(vec![])),
+        );
+
+        let cached = sm.load_cached_bundle().await.unwrap();
+        assert!(cached.is_none());
+    }
+
+    #[tokio::test]
+    async fn load_cached_bundle_none_when_sentinel_stale() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bundle = CertBundle {
+            cert_pem: b"original-cert".to_vec(),
+            key_pem: b"original-key".to_vec(),
+        };
+
+        struct DevNull;
+        impl CertSink for DevNull {
+            fn publish(&self, _: &str, _: &CertBundle) -> Result<(), SinkError> {
+                Ok(())
+            }
+        }
+
+        let sm = AcmeStateMachine::new_with_issuer(
+            test_config(tmp.path()),
+            Box::new(DevNull),
+            Box::new(MockIssuer::with_results(vec![])),
+        );
+        sm.persist_bundle(&bundle).await.unwrap();
+        tokio::fs::write(tmp.path().join(CERT_FILE), b"different-cert")
+            .await
+            .unwrap();
+
+        let cached = sm.load_cached_bundle().await.unwrap();
+        assert!(cached.is_none());
     }
 
     // ─────────────────────────────────────────────────────────────────────────
