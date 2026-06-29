@@ -38,7 +38,14 @@ impl RuntimeBridge {
         let runtime_alive_thread = runtime_alive.clone();
 
         let _handle = thread::spawn(move || {
-            runtime_alive_thread.store(true, Ordering::Release);
+            // `runtime_alive` is the operator-facing "this thread is actually
+            // serving ticks" signal. We only flip it true *after* the tokio
+            // runtime has been successfully constructed — if construction
+            // itself were to panic (extremely unlikely, but `Builder::build`
+            // is not contractually panic-free), the AtomicBool stays false
+            // and `is_alive()` returns the truth rather than reporting a
+            // dead thread as alive.
+            //
             // enable_all so the IO driver is present for the rustls/hyper
             // HTTPS transport used by instant-acme. Without IO, the first
             // connect attempt would fail and the runtime would drop.
@@ -48,10 +55,11 @@ impl RuntimeBridge {
                     envoy_proxy_dynamic_modules_rust_sdk::envoy_log_error!(
                         "envoy-acme: failed to create tokio runtime: {e}"
                     );
-                    runtime_alive_thread.store(false, Ordering::Release);
+                    // `runtime_alive` was never set to true; nothing to clear.
                     return;
                 }
             };
+            runtime_alive_thread.store(true, Ordering::Release);
 
             // Catch any panic that escapes block_on so it surfaces as an
             // envoy log line. Without this, a panic on this thread just
