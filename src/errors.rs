@@ -1,5 +1,7 @@
 use thiserror::Error;
 
+use envoy_proxy_dynamic_modules_rust_sdk::abi::envoy_dynamic_module_type_metrics_result;
+
 #[derive(Debug, Error)]
 pub enum ConfigError {
     #[error("json parse error: {0}")]
@@ -42,4 +44,15 @@ pub enum RuntimeError {
     Stopped,
     #[error("{0}")]
     Bootstrap(String),
+    /// Carries the SDK's `envoy_dynamic_module_type_metrics_result` verbatim
+    /// so operators see the actual SDK enum variant in logs, not a
+    /// stringified `format!("{e:?}")` of it.
+    #[error("metrics registration failed: {0:?}")]
+    Metrics(envoy_dynamic_module_type_metrics_result),
+}
+
+impl From<envoy_dynamic_module_type_metrics_result> for RuntimeError {
+    fn from(e: envoy_dynamic_module_type_metrics_result) -> Self {
+        Self::Metrics(e)
+    }
 }

@@ -12,6 +12,7 @@ mod challenge_store;
 mod config;
 mod errors;
 mod http_filter;
+mod metrics;
 mod runtime;
 mod state_lock;
 #[cfg(test)]
