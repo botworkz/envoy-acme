@@ -11,11 +11,14 @@ use rand::Rng;
 use crate::config::Config;
 use crate::errors::RuntimeError;
 use crate::runtime::RuntimeBridge;
+use crate::state_lock::StateLock;
 
 pub struct AcmeBootstrapConfig {
     runtime: RuntimeBridge,
     tick_seconds: u64,
     _timer: Arc<Mutex<Option<Box<dyn EnvoyBootstrapExtensionTimer>>>>,
+    #[allow(dead_code)] // kept alive solely to hold the flock
+    _state_lock: StateLock,
 }
 
 impl AcmeBootstrapConfig {
@@ -23,6 +26,7 @@ impl AcmeBootstrapConfig {
         envoy_config: &mut dyn EnvoyBootstrapExtensionConfig,
         config: Config,
     ) -> Result<Self, RuntimeError> {
+        let state_lock = StateLock::acquire(&config.acme.state_dir)?;
         let tick_seconds = config.acme.tick_seconds;
         let runtime = RuntimeBridge::new(config);
         let timer = envoy_config.new_timer();
@@ -33,6 +37,7 @@ impl AcmeBootstrapConfig {
             runtime,
             tick_seconds,
             _timer: Arc::new(Mutex::new(Some(timer))),
+            _state_lock: state_lock,
         })
     }
 }
