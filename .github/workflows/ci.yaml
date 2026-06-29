@@ -61,7 +61,7 @@ jobs:
         ENVOY_IP=$(docker inspect \
           "$(docker compose ps -q envoy)" \
           --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}')
-        echo "Registering example.test → ${ENVOY_IP}"
+        echo "Registering example.test \u2192 ${ENVOY_IP}"
         curl -sf -X POST http://localhost:8055/add-a \
           -H "Content-Type: application/json" \
           -d "{\"host\":\"example.test\",\"addresses\":[\"${ENVOY_IP}\"]}"
@@ -70,11 +70,22 @@ jobs:
       run: |
         set -euo pipefail
         for i in $(seq 1 60); do
-          docker compose exec -T envoy \
-            test -f /var/lib/envoy-acme/certs/example.test.cert.pem && exit 0
+          # The image ships a self-signed placeholder cert whose issuer
+          # CN is "example.test". Once FilesystemSink overwrites it with
+          # a Pebble-issued cert, the issuer DN changes (Pebble's CA CN
+          # contains "Pebble"). Wait until the issuer is no longer the
+          # placeholder.
+          ISSUER=$(docker compose exec -T envoy \
+            openssl x509 \
+              -in /var/lib/envoy-acme/certs/example.test.cert.pem \
+              -noout -issuer 2>/dev/null || true)
+          case "${ISSUER}" in
+            *Pebble*) exit 0 ;;
+          esac
           sleep 2
         done
-        echo "certificate not generated in time" >&2
+        echo "certificate not issued by Pebble in time" >&2
+        echo "last issuer line: ${ISSUER:-<none>}" >&2
         docker compose logs envoy pebble challtestsrv
         exit 1
 
