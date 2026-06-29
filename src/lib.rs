@@ -17,6 +17,16 @@ fn program_init() -> bool {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .try_init();
+
+    // rustls 0.23 requires a process-wide CryptoProvider to be installed
+    // before any ClientConfig::builder() runs. Without this the first
+    // HTTPS call from the ACME state machine panics on the tokio
+    // runtime thread, which unwinds block_on, drops the channel
+    // receiver, and leaves every subsequent tick logging
+    // "runtime thread already stopped". install_default returns Err if
+    // a provider is already installed; ignore that.
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     true
 }
 
