@@ -23,6 +23,7 @@ const CERT_FILE: &str = "cert.pem";
 const KEY_FILE: &str = "key.pem";
 const SENTINEL_FILE: &str = "bundle.ok";
 const BACKOFF_FILE: &str = "backoff.json";
+const DEFAULT_HEARTBEAT_EVERY_TICKS: u32 = 60;
 
 fn sha256_hex(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
@@ -79,7 +80,10 @@ pub struct AcmeStateMachine {
     config: AcmeConfig,
     sink: Box<dyn CertSink>,
     last_not_after_unix: Option<i64>,
+    last_renewal_at_unix: Option<u64>,
     backoff: BackoffState,
+    heartbeat_every_ticks: u32,
+    ticks_since_last_heartbeat: u32,
     issuer: Box<dyn Issuer>,
 }
 
@@ -100,7 +104,11 @@ impl AcmeStateMachine {
             config,
             sink,
             last_not_after_unix: None,
+            last_renewal_at_unix: None,
             backoff: BackoffState::default(),
+            // TODO: make heartbeat interval configurable via `acme.heartbeat_every_ticks`.
+            heartbeat_every_ticks: DEFAULT_HEARTBEAT_EVERY_TICKS,
+            ticks_since_last_heartbeat: 0,
             issuer,
         }
     }
@@ -134,6 +142,7 @@ impl AcmeStateMachine {
     ///           └─ other        →  return Err(e)  [retry next tick]
     /// ```
     pub async fn tick_at(&mut self, now_unix: i64) -> Result<(), AcmeError> {
+        let emit_heartbeat = self.should_emit_heartbeat();
         tokio::fs::create_dir_all(&self.config.state_dir).await?;
 
         // Reload persisted backoff so that restarts respect next_retry_at.
@@ -162,23 +171,27 @@ impl AcmeStateMachine {
                 domain,
                 next_retry_at, "rate-limit backoff active, skipping issuance"
             );
+            if emit_heartbeat {
+                self.emit_heartbeat(now_unix, true);
+            }
             return Ok(());
         }
 
         // ── Renewal window check ─────────────────────────────────────────
         let cached = self.load_cached_bundle().await?;
         if let Some((bundle, not_after)) = cached {
-            if !renewal::needs_renewal_at_with_domain_offset(
+            // Keep the most recently observed cert expiry in memory for heartbeat logs.
+            self.last_not_after_unix = Some(not_after);
+            if !renewal::needs_renewaxl_at_with_domain_offset(
                 not_after,
                 now_unix,
                 self.config.renewal_window_days,
                 domain,
             ) {
-                self.last_not_after_unix = Some(not_after);
-                if let Ok(not_after_unix) = u64::try_from(not_after) {
-                    metrics::set_cert_not_after(domain, not_after_unix);
-                }
                 self.publish("cached", &bundle)?;
+                if emit_heartbeat {
+                    self.emit_heartbeat(now_unix, false);
+                }
                 return Ok(());
             }
         }
@@ -200,6 +213,7 @@ impl AcmeStateMachine {
                     }
                     Err(e) => error!(%e, "unable to parse not_after from issued certificate"),
                 }
+                self.last_renewal_at_unix = u64::try_from(now_unix).ok();
 
                 // Successful issuance clears any rate-limit back-off.
                 self.backoff.clear();
@@ -208,6 +222,9 @@ impl AcmeStateMachine {
                 metrics::set_consecutive_failures(domain, 0);
                 metrics::set_next_retry_at(domain, 0);
 
+                if emit_heartbeat {
+                    self.emit_heartbeat(now_unix, false);
+                }
                 Ok(())
             }
             Err(e) => {
@@ -230,7 +247,13 @@ impl AcmeStateMachine {
                         metrics::set_next_retry_at(domain, next_retry_at_unix);
                     }
                 }
+<<<<<<< HEAD
                 metrics::set_consecutive_failures(domain, self.backoff.consecutive_failures);
+=======
+                if emit_heartbeat {
+                    self.emit_heartbeat(now_unix, false);
+                }
+>>>>>>> bc04f96 (acme: Add periodic heartbeat logs and tests)
                 // Non-rate-limit errors propagate as-is; the caller logs them
                 // and retries on the next ordinary tick interval.
                 Err(e)
@@ -242,6 +265,44 @@ impl AcmeStateMachine {
     pub async fn force_renew(&mut self) -> Result<(), AcmeError> {
         self.last_not_after_unix = None;
         self.tick().await
+    }
+
+    fn should_emit_heartbeat(&mut self) -> bool {
+        self.ticks_since_last_heartbeat = self.ticks_since_last_heartbeat.saturating_add(1);
+        if self
+            .ticks_since_last_heartbeat
+            .ge(&self.heartbeat_every_ticks.max(1))
+        {
+            self.ticks_since_last_heartbeat = 0;
+            return true;
+        }
+        false
+    }
+
+    fn emit_heartbeat(&self, now_unix: i64, backoff_blocked: bool) {
+        let cert_not_after_unix = self.last_not_after_unix.and_then(|v| u64::try_from(v).ok());
+        let next_attempt_at_unix = if backoff_blocked {
+            self.backoff
+                .next_retry_at
+                .and_then(|v| u64::try_from(v).ok())
+        } else {
+            let tick_seconds = i64::try_from(self.config.tick_seconds).ok();
+            tick_seconds
+                .and_then(|delta| now_unix.checked_add(delta))
+                .and_then(|v| u64::try_from(v).ok())
+        };
+
+        for domain in &self.config.domains {
+            info!(
+                domain = %domain,
+                state = "heartbeat",
+                cert_not_after_unix = ?cert_not_after_unix,
+                last_renewal_at_unix = ?self.last_renewal_at_unix,
+                next_attempt_at_unix = ?next_attempt_at_unix,
+                consecutive_failures = self.backoff.consecutive_failures,
+                "envoy-acme heartbeat"
+            );
+        }
     }
 
     async fn load_cached_bundle(&self) -> Result<Option<(CertBundle, i64)>, AcmeError> {
@@ -366,6 +427,7 @@ mod tests {
     use std::time::Duration;
 
     use rcgen::{CertificateParams, KeyPair};
+    use tracing_test::traced_test;
 
     use super::*;
     use crate::cert_sink::{CertBundle, CertSink};
@@ -914,5 +976,125 @@ mod tests {
             max - min,
             window_secs
         );
+    }
+
+    // ────────────────────────────────────────────────────────────────────────
+    // Heartbeat tests
+    //
+    // NOTE: `#[traced_test]` MUST be the outer attribute and `#[tokio::test]`
+    // the inner one. `traced_test` installs its thread-local subscriber by
+    // wrapping the test fn; if `tokio::test` is outer, the runtime is built
+    // first and `info!` calls from inside the async body run on a worker
+    // thread where the subscriber is not in scope, so `logs_contain` and
+    // `logs_assert` will return nothing and the tests will fail spuriously.
+    // ────────────────────────────────────────────────────────────────────────
+    #[traced_test]
+    #[tokio::test]
+    async fn heartbeat_fires_on_threshold() {
+        let tmp = tempfile::tempdir().unwrap();
+        let now_unix = 1_000_000i64;
+        let not_after = now_unix + 90 * 86_400;
+        let (cert_pem, key_pem) = generate_cert(not_after);
+        std::fs::write(tmp.path().join("cert.pem"), &cert_pem).unwrap();
+        std::fs::write(tmp.path().join("key.pem"), &key_pem).unwrap();
+
+        struct DevNull;
+        impl CertSink for DevNull {
+            fn publish(&self, _: &str, _: &CertBundle) -> Result<(), SinkError> {
+                Ok(())
+            }
+        }
+
+        let issuer = Box::new(MockIssuer::with_results(vec![]));
+        let mut sm =
+            AcmeStateMachine::new_with_issuer(test_config(tmp.path()), Box::new(DevNull), issuer);
+        sm.heartbeat_every_ticks = 3;
+
+        sm.tick_at(now_unix).await.unwrap();
+        sm.tick_at(now_unix + 60).await.unwrap();
+        sm.tick_at(now_unix + 120).await.unwrap();
+
+        logs_assert(|lines: &[&str]| {
+            let count = lines
+                .iter()
+                .filter(|line| line.contains("envoy-acme heartbeat"))
+                .count();
+            match count {
+                1 => Ok(()),
+                n => Err(format!("expected exactly one heartbeat event, got {n}")),
+            }
+        });
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn heartbeat_includes_expected_fields() {
+        let tmp = tempfile::tempdir().unwrap();
+        let now_unix = 1_000_000i64;
+        let not_after = now_unix + 90 * 86_400;
+        let (cert_pem, key_pem) = generate_cert(not_after);
+        std::fs::write(tmp.path().join("cert.pem"), &cert_pem).unwrap();
+        std::fs::write(tmp.path().join("key.pem"), &key_pem).unwrap();
+
+        struct DevNull;
+        impl CertSink for DevNull {
+            fn publish(&self, _: &str, _: &CertBundle) -> Result<(), SinkError> {
+                Ok(())
+            }
+        }
+
+        let issuer = Box::new(MockIssuer::with_results(vec![]));
+        let mut sm =
+            AcmeStateMachine::new_with_issuer(test_config(tmp.path()), Box::new(DevNull), issuer);
+        sm.heartbeat_every_ticks = 1;
+
+        sm.tick_at(now_unix).await.unwrap();
+
+        assert!(logs_contain("envoy-acme heartbeat"));
+        assert!(logs_contain("domain=a.example.test"));
+        assert!(logs_contain("state=\"heartbeat\""));
+        assert!(logs_contain("consecutive_failures=0"));
+        assert!(logs_contain("cert_not_after_unix=Some("));
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn heartbeat_resets_counter() {
+        let tmp = tempfile::tempdir().unwrap();
+        let now_unix = 1_000_000i64;
+        let not_after = now_unix + 90 * 86_400;
+        let (cert_pem, key_pem) = generate_cert(not_after);
+        std::fs::write(tmp.path().join("cert.pem"), &cert_pem).unwrap();
+        std::fs::write(tmp.path().join("key.pem"), &key_pem).unwrap();
+
+        struct DevNull;
+        impl CertSink for DevNull {
+            fn publish(&self, _: &str, _: &CertBundle) -> Result<(), SinkError> {
+                Ok(())
+            }
+        }
+
+        let issuer = Box::new(MockIssuer::with_results(vec![]));
+        let mut sm =
+            AcmeStateMachine::new_with_issuer(test_config(tmp.path()), Box::new(DevNull), issuer);
+        sm.heartbeat_every_ticks = 3;
+
+        sm.tick_at(now_unix).await.unwrap();
+        sm.tick_at(now_unix + 60).await.unwrap();
+        sm.tick_at(now_unix + 120).await.unwrap();
+        sm.tick_at(now_unix + 180).await.unwrap();
+        sm.tick_at(now_unix + 240).await.unwrap();
+        sm.tick_at(now_unix + 300).await.unwrap();
+
+        logs_assert(|lines: &[&str]| {
+            let count = lines
+                .iter()
+                .filter(|line| line.contains("envoy-acme heartbeat"))
+                .count();
+            match count {
+                2 => Ok(()),
+                n => Err(format!("expected exactly two heartbeat events, got {n}")),
+            }
+        });
     }
 }
