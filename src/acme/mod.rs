@@ -526,12 +526,11 @@ mod tests {
 
         let metrics: HashSet<_> = crate::metrics::take_test_updates().into_iter().collect();
         assert!(metrics.contains("envoy_acme_issuance_total:success"));
-        assert!(
-            metrics
-                .iter()
-                .any(|metric| metric.starts_with("envoy_acme_issuance_duration_seconds:"))
-        );
+        assert!(metrics
+            .iter()
+            .any(|metric| metric.starts_with("envoy_acme_issuance_duration_seconds:")));
         assert!(metrics.contains("envoy_acme_consecutive_failures:a.example.test:0"));
+        assert!(metrics.contains("envoy_acme_next_retry_at_seconds:a.example.test:0"));
         assert!(metrics.contains(&format!(
             "envoy_acme_cert_not_after_seconds:a.example.test:{}",
             new_not_after
@@ -620,24 +619,21 @@ mod tests {
 
         let metrics: HashSet<_> = crate::metrics::take_test_updates().into_iter().collect();
         assert!(metrics.contains("envoy_acme_issuance_total:failure"));
-        assert!(
-            metrics
-                .iter()
-                .any(|metric| metric.starts_with("envoy_acme_issuance_duration_seconds:"))
-        );
+        assert!(metrics
+            .iter()
+            .any(|metric| metric.starts_with("envoy_acme_issuance_duration_seconds:")));
         assert!(metrics.contains("envoy_acme_consecutive_failures:a.example.test:1"));
 
         let next_retry_metric = metrics
             .iter()
-            .find(|metric| metric.starts_with("envoy_acme_next_retry_at_seconds:a.example.test:"))
+            .filter_map(|metric| {
+                metric
+                    .strip_prefix("envoy_acme_next_retry_at_seconds:a.example.test:")
+                    .and_then(|value| value.parse::<i64>().ok())
+            })
+            .max()
             .expect("next_retry_at metric should be recorded");
-        let next_retry_at = next_retry_metric
-            .rsplit(':')
-            .next()
-            .unwrap()
-            .parse::<i64>()
-            .unwrap();
-        assert!(next_retry_at > now_unix);
+        assert!(next_retry_metric > now_unix);
     }
 
     // ─────────────────────────────────────────────────────────────────────────

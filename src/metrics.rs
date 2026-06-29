@@ -43,15 +43,15 @@ pub(crate) fn init(
     envoy_config: &mut dyn EnvoyBootstrapExtensionConfig,
 ) -> Result<(), envoy_dynamic_module_type_metrics_result> {
     let ids = MetricIds {
-        issuance_total: envoy_config.define_counter_vec("envoy_acme_issuance_total", &["result"])?,
+        issuance_total: envoy_config
+            .define_counter_vec("envoy_acme_issuance_total", &["result"])?,
         consecutive_failures: envoy_config
             .define_gauge_vec("envoy_acme_consecutive_failures", &["domain"])?,
         next_retry_at: envoy_config
             .define_gauge_vec("envoy_acme_next_retry_at_seconds", &["domain"])?,
         cert_not_after: envoy_config
             .define_gauge_vec("envoy_acme_cert_not_after_seconds", &["domain"])?,
-        issuance_duration: envoy_config
-            .define_histogram("envoy_acme_issuance_duration_seconds")?,
+        issuance_duration: envoy_config.define_histogram("envoy_acme_issuance_duration_seconds")?,
     };
 
     let state = Arc::new(MetricsState {
@@ -64,10 +64,7 @@ pub(crate) fn init(
     Ok(())
 }
 
-pub(crate) fn on_scheduled(
-    envoy_config: &mut dyn EnvoyBootstrapExtensionConfig,
-    event_id: u64,
-) {
+pub(crate) fn on_scheduled(envoy_config: &mut dyn EnvoyBootstrapExtensionConfig, event_id: u64) {
     if event_id != METRICS_EVENT_ID {
         return;
     }
@@ -125,6 +122,7 @@ pub(crate) fn set_cert_not_after(domain: &str, unix_ts: u64) {
     });
 }
 
+#[allow(dead_code)]
 pub(crate) fn record_runtime_alive(_alive: bool) {}
 
 fn enqueue(update: MetricUpdate) {
@@ -160,9 +158,11 @@ fn apply_update(
         MetricUpdate::IssuanceTotal { result } => {
             envoy_config.increment_counter_vec(ids.issuance_total, &[result], 1)
         }
-        MetricUpdate::ConsecutiveFailures { domain, count } => {
-            envoy_config.set_gauge_vec(ids.consecutive_failures, &[domain.as_str()], u64::from(count))
-        }
+        MetricUpdate::ConsecutiveFailures { domain, count } => envoy_config.set_gauge_vec(
+            ids.consecutive_failures,
+            &[domain.as_str()],
+            u64::from(count),
+        ),
         MetricUpdate::NextRetryAt { domain, unix_ts } => {
             envoy_config.set_gauge_vec(ids.next_retry_at, &[domain.as_str()], unix_ts)
         }
@@ -260,35 +260,31 @@ mod tests {
         envoy_config
             .expect_define_counter_vec()
             .once()
-            .withf(|name, labels| {
-                *name == "envoy_acme_issuance_total" && *labels == ["result"]
-            })
+            .withf(|name, labels| name == "envoy_acme_issuance_total" && labels == ["result"])
             .return_once(|_, _| Ok(EnvoyCounterVecId(1)));
         envoy_config
             .expect_define_gauge_vec()
             .once()
-            .withf(|name, labels| {
-                *name == "envoy_acme_consecutive_failures" && *labels == ["domain"]
-            })
+            .withf(|name, labels| name == "envoy_acme_consecutive_failures" && labels == ["domain"])
             .return_once(|_, _| Ok(EnvoyGaugeVecId(2)));
         envoy_config
             .expect_define_gauge_vec()
             .once()
             .withf(|name, labels| {
-                *name == "envoy_acme_next_retry_at_seconds" && *labels == ["domain"]
+                name == "envoy_acme_next_retry_at_seconds" && labels == ["domain"]
             })
             .return_once(|_, _| Ok(EnvoyGaugeVecId(3)));
         envoy_config
             .expect_define_gauge_vec()
             .once()
             .withf(|name, labels| {
-                *name == "envoy_acme_cert_not_after_seconds" && *labels == ["domain"]
+                name == "envoy_acme_cert_not_after_seconds" && labels == ["domain"]
             })
             .return_once(|_, _| Ok(EnvoyGaugeVecId(4)));
         envoy_config
             .expect_define_histogram()
             .once()
-            .withf(|name| *name == "envoy_acme_issuance_duration_seconds")
+            .withf(|name| name == "envoy_acme_issuance_duration_seconds")
             .return_once(|_| Ok(EnvoyHistogramId(5)));
         envoy_config
             .expect_new_scheduler()
