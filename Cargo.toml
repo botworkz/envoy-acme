@@ -40,3 +40,4 @@ sha2 = "0.10"
 
 [dev-dependencies]
 mockall = "0.13"
+tracing-test = "0.2"
