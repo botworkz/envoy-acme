@@ -12,6 +12,7 @@ use rand::Rng;
 
 use crate::config::Config;
 use crate::errors::RuntimeError;
+use crate::metrics;
 use crate::runtime::RuntimeBridge;
 use crate::state_lock::StateLock;
 
@@ -40,6 +41,8 @@ impl AcmeBootstrapConfig {
             }
         }
 
+        // `?` works directly here: errors.rs has `impl From<envoy_dynamic_module_type_metrics_result> for RuntimeError`.
+        metrics::init(envoy_config)?;
         let tick_seconds = config.acme.tick_seconds;
         let runtime = RuntimeBridge::new(config);
         let timer = envoy_config.new_timer();
@@ -78,7 +81,7 @@ fn handle_runtime_tick_result<F>(
                 .map(|t| now.duration_since(t) >= Duration::from_secs(60))
                 .unwrap_or(true);
             if should_log {
-                // TODO(v0.2 #1): expose runtime_alive gauge once metrics module is in.
+                // TODO(v0.2 #4 follow-up): expose runtime_alive gauge.
                 log_error(DEAD_RUNTIME_LOG_MESSAGE);
                 *last_log = Some(now);
             }
@@ -132,6 +135,14 @@ impl BootstrapExtensionConfig for AcmeBootstrapConfig {
         let jitter: f64 = rand::thread_rng().gen_range(0.9..=1.1);
         let jittered = ((self.tick_seconds as f64) * jitter) as u64;
         timer.enable(std::time::Duration::from_secs(jittered));
+    }
+
+    fn on_scheduled(
+        &self,
+        envoy_extension_config: &mut dyn EnvoyBootstrapExtensionConfig,
+        event_id: u64,
+    ) {
+        metrics::on_scheduled(envoy_extension_config, event_id);
     }
 
     fn on_http_callout_done(
