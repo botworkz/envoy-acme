@@ -34,6 +34,8 @@ services:
     - "8080:80"
     - "8443:443"
     - "9901:9901"
+    volumes:
+    - ./envoy/bootstrap.test.yaml:/etc/envoy/bootstrap.yaml:ro
     environment:
       ENVOY_DYNAMIC_MODULES_SEARCH_PATH: /etc/envoy/modules
 
