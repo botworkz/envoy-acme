@@ -33,16 +33,20 @@ RUN mkdir -p /sds-placeholder \
       > /sds-placeholder/example.test.secret.yaml
 
 FROM envoyproxy/envoy:v1.38-latest
+# ENVOY_UID is intentionally not used in the chown below; it exists as an
+# override surface for downstream FROM users who rebase on a base image where
+# the envoy user is mapped to a different uid (pass --build-arg ENVOY_UID=...).
+ARG ENVOY_UID=101
 COPY --from=build /src/target/x86_64-unknown-linux-gnu/release/libenvoy_acme.so /etc/envoy/modules/libenvoy_acme.so
 COPY --from=build /sds-placeholder/ /var/lib/envoy-acme/certs/
 COPY envoy/bootstrap.yaml /etc/envoy/bootstrap.yaml
 COPY config/example.yaml /etc/envoy/envoy-acme.yaml
 COPY config/pebble-certs /etc/envoy/pebble-certs
-# Hand /var/lib/envoy-acme to uid 101 so the unprivileged envoy user
+# Hand /var/lib/envoy-acme to the envoy user so the unprivileged process
 # can write account.json, cert.pem, key.pem and *.secret.yaml. The COPY
 # above leaves the tree owned by root:root which would EACCES on first
 # tick.
 USER root
-RUN chown -R 101:101 /var/lib/envoy-acme
+RUN chown -R envoy:envoy /var/lib/envoy-acme
 USER envoy
 CMD ["envoy", "-c", "/etc/envoy/bootstrap.yaml", "--service-cluster", "envoy-acme-demo"]
