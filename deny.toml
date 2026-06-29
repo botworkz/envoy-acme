@@ -1,0 +1,63 @@
+# cargo-deny policy — https://embarkstudios.github.io/cargo-deny/
+#
+# Lint levels: "deny" | "warn" | "allow"
+
+[graph]
+targets = [{ triple = "x86_64-unknown-linux-gnu" }]
+
+# ── Vulnerability / advisory checks ──────────────────────────────────────────
+[advisories]
+# Vulnerabilities in the dependency tree are always hard errors (cargo-deny
+# v0.19 default; the old `vulnerability = "deny"` field is deprecated).
+
+# Check unmaintained advisories for all crates; ignored exceptions are listed
+# below with a rationale.
+unmaintained = "all"
+
+# Warn on yanked crate versions so we notice without immediately blocking CI.
+yanked = "warn"
+
+# Known unmaintained crates without a safe upgrade path — tighten as fixes
+# become available.
+ignore = [
+    # rustls-pemfile v2 is a thin wrapper over rustls-pki-types; upstream
+    # archived the repo but no breaking API change is needed to migrate.
+    # Track: https://github.com/rustls/pemfile/issues/61
+    { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile is unmaintained but no safe drop-in upgrade exists yet; tracked for future migration to rustls-pki-types" },
+]
+
+# ── License checks ────────────────────────────────────────────────────────────
+# Enumerated from `cargo deny list -f tsv` against the current Cargo.lock.
+[licenses]
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "ISC",
+    "MIT",
+    "MIT-0",
+    "Unicode-3.0",
+    "Unlicense",
+]
+confidence-threshold = 0.8
+
+# ── Banned / duplicate crates ─────────────────────────────────────────────────
+[bans]
+# Warn on duplicate versions; tighten to "deny" per-crate as needed.
+multiple-versions = "warn"
+wildcards = "allow"
+deny = []
+
+# ── Allowed source registries and git hosts ───────────────────────────────────
+[sources]
+# Deny any registry that isn't crates.io.
+unknown-registry = "deny"
+# Warn on git sources not listed below (don't hard-fail until the allow list
+# is well understood).
+unknown-git = "warn"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# The Envoy SDK is consumed directly from the envoyproxy/envoy repo.
+allow-git = ["https://github.com/envoyproxy/envoy"]
