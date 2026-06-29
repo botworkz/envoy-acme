@@ -170,7 +170,7 @@ VERSION=0.3.0   # substitute the actual release version
 
 cosign verify-blob \
   --certificate-identity-regexp \
-    "https://github.com/botworkz/envoy-acme/.github/workflows/ci.yaml@refs/heads/main" \
+    "https://github.com/botworkz/envoy-acme/.github/workflows/ci.yaml@refs/(heads/main|tags/v.*)" \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   --signature "libenvoy_acme-${VERSION}-x86_64-unknown-linux-gnu.so.sig" \
   --certificate "libenvoy_acme-${VERSION}-x86_64-unknown-linux-gnu.so.pem" \
