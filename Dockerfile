@@ -20,6 +20,7 @@ RUN mkdir -p /sds-placeholder \
       -out    /sds-placeholder/example.test.cert.pem \
       -days 1 -subj '/CN=example.test' \
       -addext 'subjectAltName=DNS:example.test' \
+ && chmod 0644 /sds-placeholder/example.test.key.pem \
  && printf '%s\n' \
       'resources:' \
       '  - "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.Secret' \

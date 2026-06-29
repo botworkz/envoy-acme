@@ -26,7 +26,15 @@ impl RuntimeBridge {
         let (tx, mut rx) = mpsc::unbounded_channel::<Command>();
 
         thread::spawn(move || {
-            let runtime = match Builder::new_current_thread().enable_time().build() {
+            // enable_all() enables both the time driver and the IO driver.
+            // instant-acme's HTTPS calls (and the rustls/hyper transport
+            // used here) require the IO driver; building the runtime with
+            // only enable_time() let the first .await on a TCP connect
+            // panic, which dropped the runtime and the receiver, after
+            // which every subsequent tx.send() returned Err and the
+            // extension logged "tick failed: runtime thread already
+            // stopped" forever.
+            let runtime = match Builder::new_current_thread().enable_all().build() {
                 Ok(rt) => rt,
                 Err(e) => {
                     envoy_proxy_dynamic_modules_rust_sdk::envoy_log_error!(
