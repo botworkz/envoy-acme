@@ -1,4 +1,4 @@
-.PHONY: fmt clippy build test check up down logs
+.PHONY: fmt clippy build test coverage check up down logs
 
 fmt:
 	cargo fmt --all
@@ -11,6 +11,14 @@ build:
 
 test:
 	cargo test
+
+coverage:
+	cargo tarpaulin \
+		--workspace \
+		--timeout 180 \
+		--out Html \
+		--output-dir target/tarpaulin \
+		--skip-clean
 
 check: fmt clippy test
 

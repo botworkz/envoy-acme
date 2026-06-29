@@ -8,7 +8,7 @@ repository = "https://github.com/botworkz/envoy-acme"
 description = "Envoy ACME dynamic module prototype"
 
 [lib]
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 # Envoy v1.38.x SDK path (dynamic modules Rust SDK is consumed from Envoy repo tags).
