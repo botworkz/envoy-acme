@@ -130,8 +130,11 @@ filter_config:
 ```
 
 The `domains` list must contain the same values as `acme.domains` in the
-bootstrap extension config.  Requests whose `Host` / `:authority` header is
-not in this list are passed through to the next filter unchanged, so the HTTP
+bootstrap extension config.  Domain matching is **case-insensitive** and
+**port-stripped**, so `EXAMPLE.COM`, `example.com`, and `example.com:80` all
+match a configured domain of `example.com`.  Any casing is accepted in the
+config.  Requests whose `Host` / `:authority` header does not match any
+configured domain are passed through to the next filter unchanged, so the HTTP
 filter is safe to place in front of other virtual hosts on a shared listener.
 
 ## Docker image

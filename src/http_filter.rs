@@ -118,17 +118,24 @@ impl<EHF: EnvoyHttpFilter> HttpFilter<EHF> for AcmeHttpFilter {
 /// Normalise a `Host` / `:authority` header value for domain matching.
 ///
 /// - Converts to lowercase.
-/// - Strips a trailing port (`:8080`) when the suffix after the last `:` is
-///   all ASCII digits.  IPv6 addresses wrapped in brackets are left unchanged
-///   because `rfind(':')` would point inside the bracket group, not at the
-///   optional port separator.
+/// - For plain hostnames / IPv4: strips a trailing port (`:8080`) when the
+///   suffix after the last `:` is all ASCII digits.
+/// - For IPv6 addresses in brackets: strips a port after the closing bracket
+///   (e.g. `[::1]:8080` → `[::1]`).  A malformed value without a closing
+///   bracket is returned unchanged (it will not match any configured domain).
 fn normalize_host(host: &[u8]) -> String {
     let s = String::from_utf8_lossy(host).to_lowercase();
-    if !s.starts_with('[') {
-        if let Some(colon) = s.rfind(':') {
-            if s[colon + 1..].bytes().all(|b| b.is_ascii_digit()) {
-                return s[..colon].to_string();
+    if s.starts_with('[') {
+        // IPv6 literal: strip port that follows the closing ']', if present.
+        if let Some(bracket_end) = s.find(']') {
+            let after = &s[bracket_end + 1..];
+            if after.starts_with(':') && after[1..].bytes().all(|b| b.is_ascii_digit()) {
+                return s[..=bracket_end].to_string();
             }
+        }
+    } else if let Some(colon) = s.rfind(':') {
+        if s[colon + 1..].bytes().all(|b| b.is_ascii_digit()) {
+            return s[..colon].to_string();
         }
     }
     s
@@ -153,7 +160,7 @@ mod tests {
 
     fn make_filter(domains: &[&str]) -> AcmeHttpFilter {
         AcmeHttpFilter {
-            domains: Arc::new(domains.iter().map(|d| d.to_string()).collect()),
+            domains: Arc::new(domains.iter().map(|d| d.to_lowercase()).collect()),
         }
     }
 
@@ -178,6 +185,18 @@ mod tests {
     #[test]
     fn normalize_host_no_port() {
         assert_eq!(normalize_host(b"example.com"), "example.com");
+    }
+
+    #[test]
+    fn normalize_host_ipv6_strips_port() {
+        assert_eq!(normalize_host(b"[::1]:8080"), "[::1]");
+        assert_eq!(normalize_host(b"[::1]"), "[::1]");
+    }
+
+    #[test]
+    fn normalize_host_ipv6_malformed_no_change() {
+        // Missing closing bracket — returned unchanged (will not match any domain)
+        assert_eq!(normalize_host(b"[::1:8080"), "[::1:8080");
     }
 
     // ── on_request_headers ────────────────────────────────────────────────────
