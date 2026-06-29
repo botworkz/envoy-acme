@@ -79,7 +79,13 @@ fn filter_tokenless_challenges(body: Bytes) -> Bytes {
     if chals.len() == before {
         return body;
     }
-    serde_json::to_vec(&value).map(Bytes::from).unwrap_or(body)
+    match serde_json::to_vec(&value) {
+        Ok(filtered) => Bytes::from(filtered),
+        Err(e) => {
+            tracing::debug!("filter_tokenless_challenges: re-serialization failed: {e}");
+            body
+        }
+    }
 }
 
 /// Build an instant-acme [`HttpClient`] that trusts `ca_path` as its sole root
