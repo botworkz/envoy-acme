@@ -34,8 +34,6 @@ services:
     - "8080:80"
     - "8443:443"
     - "9901:9901"
-    volumes:
-    - acme-state:/var/lib/envoy-acme
     environment:
       ENVOY_DYNAMIC_MODULES_SEARCH_PATH: /etc/envoy/modules
 
@@ -44,6 +42,3 @@ services:
     command: ["-text=hello from upstream", "-listen=:8080"]
     expose:
     - "8080"
-
-volumes:
-  acme-state:

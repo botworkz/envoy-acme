@@ -106,41 +106,40 @@ static_resources:
             typed_config:
               "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
 
-clusters:
-- name: demo_upstream
-  connect_timeout: 1s
-  type: STRICT_DNS
-  load_assignment:
-    cluster_name: demo_upstream
-    endpoints:
-    - lb_endpoints:
-      - endpoint:
-          address:
-            socket_address:
-              address: upstream
-              port_value: 8080
+  clusters:
+  - name: demo_upstream
+    connect_timeout: 1s
+    type: STRICT_DNS
+    load_assignment:
+      cluster_name: demo_upstream
+      endpoints:
+      - lb_endpoints:
+        - endpoint:
+            address:
+              socket_address:
+                address: upstream
+                port_value: 8080
 
-# acme_directory is reserved for a future send_http_callout-based ACME
-# implementation (see TODO in src/acme/order.rs).  instant-acme currently
-# owns its own HTTPS transport, so this cluster is not actively used.
-- name: acme_directory
-  connect_timeout: 2s
-  type: STRICT_DNS
-  load_assignment:
-    cluster_name: acme_directory
-    endpoints:
-    - lb_endpoints:
-      - endpoint:
-          address:
-            socket_address:
-              address: pebble
-              port_value: 14000
-
-  transport_socket:
-    name: envoy.transport_sockets.tls
-    typed_config:
-      "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
-      common_tls_context:
-        validation_context:
-          trusted_ca:
-            filename: /etc/envoy/pebble-certs/pebble.minica.pem
+  # acme_directory is reserved for a future send_http_callout-based ACME
+  # implementation (see TODO in src/acme/order.rs).  instant-acme currently
+  # owns its own HTTPS transport, so this cluster is not actively used.
+  - name: acme_directory
+    connect_timeout: 2s
+    type: STRICT_DNS
+    load_assignment:
+      cluster_name: acme_directory
+      endpoints:
+      - lb_endpoints:
+        - endpoint:
+            address:
+              socket_address:
+                address: pebble
+                port_value: 14000
+    transport_socket:
+      name: envoy.transport_sockets.tls
+      typed_config:
+        "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
+        common_tls_context:
+          validation_context:
+            trusted_ca:
+              filename: /etc/envoy/pebble-certs/pebble.minica.pem
