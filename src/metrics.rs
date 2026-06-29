@@ -237,6 +237,8 @@ pub(crate) fn take_test_updates() -> Vec<String> {
 #[cfg(test)]
 pub(crate) fn test_lock() -> std::sync::MutexGuard<'static, ()> {
     static TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    // Tests share global in-process metrics state, so callers hold this guard for
+    // the duration of each async test to serialize access intentionally.
     TEST_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
 }
 

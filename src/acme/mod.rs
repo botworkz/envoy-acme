@@ -496,8 +496,6 @@ mod tests {
         assert_eq!(sink_clone.call_count(), 1);
     }
 
-    // These tests intentionally serialize access to the metrics module's global
-    // test state for their full async body.
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn successful_issuance_emits_success_metrics() {
@@ -594,8 +592,6 @@ mod tests {
         assert_eq!(sink_clone.call_count(), 1, "cert published after backoff");
     }
 
-    // These tests intentionally serialize access to the metrics module's global
-    // test state for their full async body.
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn rate_limited_failure_emits_failure_metrics() {
