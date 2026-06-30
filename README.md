@@ -166,7 +166,34 @@ config.  Requests whose `Host` / `:authority` header does not match any
 configured domain are passed through to the next filter unchanged, so the HTTP
 filter is safe to place in front of other virtual hosts on a shared listener.
 
-## Docker image
+## Cert sink (`cert_sink`)
+
+`FilesystemSink` (the only sink type today) writes the certificate bundle to
+files in `cert_dir`.  The **first domain** in `acme.domains` is used as the
+canonical filename prefix for all output files:
+
+| File | Description |
+|---|---|
+| `<first-domain>.cert.pem` | PEM certificate chain (leaf + intermediates) |
+| `<first-domain>.key.pem` | PEM private key |
+| `<first-domain>.secret.yaml` | Envoy SDS TLS-certificate secret |
+
+For **multi-SAN certs** (`acme.domains` contains more than one name), the
+issued certificate covers _all_ configured domains as Subject Alternative
+Names (SANs), but the output files are still named after the **first domain**
+in the list.  For example, with `domains: [a.example.com, b.example.com]`,
+the files written are `a.example.com.cert.pem`, `a.example.com.key.pem`, and
+`a.example.com.secret.yaml` — even though the cert inside covers both names.
+
+The SDS `path_config_source` in the Envoy listener must point at
+`<first-domain>.secret.yaml`.  SNI-based selection then works automatically:
+Envoy reads the single cert file, which contains both SANs, and presents it
+to clients regardless of which of the configured names they connect to.
+
+> **Note:** if you need an explicit cert name independent of the domain list
+> order, a `cert_name` config field may be added in a future release.  For
+> now, reorder `domains` so the desired name comes first.
+
 
 The published image runs as the `envoy` user (uid `101` in the upstream `envoyproxy/envoy` base image).
 
@@ -203,13 +230,14 @@ The CI `integration` job validates a real end-to-end certificate issuance flow:
 
 What the integration job verifies:
 1. Envoy starts with the dynamic module loaded.
-2. The module contacts Pebble and completes HTTP-01 challenge validation via the in-process HTTP filter.
-3. `FilesystemSink` writes `example.test.cert.pem`, `example.test.key.pem`, and the Envoy SDS secret file `example.test.secret.yaml`.
-4. Envoy's HTTPS listener warms up using the SDS secret file and serves traffic.
-5. `curl --cacert pebble.minica.pem https://example.test:8443/` returns HTTP 200 with body `hello from upstream`.
-6. The certificate SAN contains `DNS:example.test` and chains to Pebble's CA.
+2. The module contacts Pebble and completes HTTP-01 challenge validation for **both** configured domains via the in-process HTTP filter.
+3. `FilesystemSink` writes `a.example.test.cert.pem`, `a.example.test.key.pem`, and the Envoy SDS secret file `a.example.test.secret.yaml` (first domain as canonical filename prefix).
+4. The issued cert contains SANs for **both** `a.example.test` and `b.example.test`.
+5. Envoy's HTTPS listener warms up using the SDS secret file and serves traffic.
+6. `curl --cacert pebble.minica.pem https://a.example.test:8443/` and `https://b.example.test:8443/` both return HTTP 200.
+7. The certificate presented on each SNI name has SANs `[a.example.test, b.example.test]` and chains to Pebble's CA.
 
-`challtestsrv` acts as a programmable DNS server: the CI step registers `example.test → envoy container IP` via its management API on `:8055` before triggering issuance, so Pebble can perform real HTTP-01 validation against Envoy.
+`challtestsrv` acts as a programmable DNS server: the CI step registers both `a.example.test` and `b.example.test` to the envoy container's IP via its management API on `:8055` before triggering issuance, so Pebble can perform real HTTP-01 validation for each name against Envoy.
 
 ## Release artifact verification
 

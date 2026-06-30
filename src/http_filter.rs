@@ -528,4 +528,52 @@ mod tests {
             abi::envoy_dynamic_module_type_on_http_filter_request_headers_status::Continue
         );
     }
+
+    /// When two domains are configured, a request with `Host: b.example.test`
+    /// (the second domain) must be handled — not passed through.
+    #[test]
+    fn responds_to_second_configured_domain_in_multi_domain_config() {
+        let token = "multi-domain-token-xyz";
+        let path = format!("/.well-known/acme-challenge/{token}");
+
+        // Configure the filter with two domains; this mirrors the multi-SAN
+        // integration test fixture (a.example.test + b.example.test).
+        let mut filter = make_filter(&["a.example.test", "b.example.test"]);
+        let mut envoy = MockEnvoyHttpFilter::new();
+
+        envoy
+            .expect_get_request_header_value()
+            .with(eq(":path"))
+            .returning(move |_| Some(EnvoyBuffer::new(path.as_bytes())));
+
+        // Request arrives with Host: b.example.test (the second configured domain).
+        envoy
+            .expect_get_request_header_value()
+            .with(eq(":authority"))
+            .returning(|_| Some(EnvoyBuffer::new(b"b.example.test")));
+
+        // The token is absent from the challenge store, so the filter replies
+        // 404 — but critically it does NOT fall through (StopIteration), which
+        // proves that b.example.test is recognised as a configured domain.
+        envoy
+            .expect_send_response()
+            .withf(|status, headers, body, details| {
+                *status == 404
+                    && headers.len() == 1
+                    && headers[0].0 == "content-type"
+                    && headers[0].1 == CONTENT_TYPE
+                    && *body == Some(NOT_FOUND)
+                    && *details == Some("acme_challenge_not_found")
+            })
+            .times(1)
+            .returning(|_, _, _, _| {});
+
+        let status = filter.on_request_headers(&mut envoy, true);
+        assert_eq!(
+            status,
+            abi::envoy_dynamic_module_type_on_http_filter_request_headers_status::StopIteration,
+            "b.example.test must be handled when configured alongside a.example.test"
+        );
+        challenge_store::remove(token);
+    }
 }
