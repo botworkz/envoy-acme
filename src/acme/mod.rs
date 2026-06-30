@@ -370,6 +370,7 @@ impl AcmeStateMachine {
                 metrics::record_issuance_success(domain, elapsed);
                 metrics::set_consecutive_failures(domain, 0);
                 metrics::set_next_retry_at(domain, 0);
+                metrics::set_account_state(domain, 0);
 
                 if emit_heartbeat {
                     self.emit_heartbeat(now_unix, false);
@@ -395,6 +396,7 @@ impl AcmeStateMachine {
                         if let Ok(next_retry_at_unix) = u64::try_from(next_retry_at) {
                             metrics::set_next_retry_at(domain, next_retry_at_unix);
                         }
+                        metrics::set_account_state(domain, 0);
                     }
                     backoff::ErrorClass::Permanent => {
                         metrics::record_issuance_permanent(domain, elapsed);
@@ -403,6 +405,7 @@ impl AcmeStateMachine {
                             problem_type, %e,
                             "permanent ACME error (bug-class): will retry but operator should investigate"
                         );
+                        metrics::set_account_state(domain, 0);
                     }
                     backoff::ErrorClass::RecoveryRequired => {
                         metrics::record_issuance_recovery_required(domain, elapsed);
@@ -418,9 +421,11 @@ impl AcmeStateMachine {
                                  authorisation); this message is rate-limited to once per 60 s"
                             );
                         }
+                        metrics::set_account_state(domain, 1);
                     }
                     backoff::ErrorClass::Transient => {
                         metrics::record_issuance_failure(domain, elapsed);
+                        metrics::set_account_state(domain, 0);
                     }
                 }
                 metrics::set_consecutive_failures(domain, self.backoff.consecutive_failures);
@@ -1089,6 +1094,7 @@ mod tests {
             .any(|metric| metric.starts_with("envoy_acme_issuance_duration_seconds:")));
         assert!(metrics.contains("envoy_acme_consecutive_failures:a.example.test:0"));
         assert!(metrics.contains("envoy_acme_next_retry_at_seconds:a.example.test:0"));
+        assert!(metrics.contains("envoy_acme_account_state:a.example.test:0"));
         assert!(metrics.contains(&format!(
             "envoy_acme_cert_not_after_seconds:a.example.test:{}",
             new_not_after
@@ -1193,6 +1199,10 @@ mod tests {
             .max()
             .expect("next_retry_at metric should be recorded");
         assert!(next_retry_metric > now_unix);
+        assert!(
+            metrics.contains("envoy_acme_account_state:a.example.test:0"),
+            "rate-limited error must set account_state=0 (not account-level)"
+        );
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -1838,6 +1848,57 @@ mod tests {
         assert!(
             !metrics.contains("envoy_acme_issuance_total:failure"),
             "recovery_required error must not emit 'failure' label"
+        );
+        assert!(
+            metrics.contains("envoy_acme_account_state:a.example.test:1"),
+            "expected account_state=1 for recovery_required but got: {metrics:?}"
+        );
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    // See permanent_error_emits_permanent_metric_label for why the suppression
+    // is safe here.
+    #[tokio::test]
+    async fn successful_issuance_after_recovery_required_clears_account_state() {
+        let _guard = crate::metrics::test_lock();
+        crate::metrics::reset_test_state();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let now_unix = 1_000_000i64;
+        let new_not_after = now_unix + 90 * 86_400;
+        let (new_cert, new_key) = generate_cert(new_not_after, &["a.example.test"]);
+
+        struct DevNull;
+        impl CertSink for DevNull {
+            fn publish(&self, _: &str, _: &CertBundle) -> Result<(), SinkError> {
+                Ok(())
+            }
+        }
+
+        let issuer = Box::new(MockIssuer::with_results(vec![
+            Err(account_does_not_exist_error()),
+            Ok(CertBundle {
+                cert_pem: new_cert,
+                key_pem: new_key,
+            }),
+        ]));
+        let mut sm =
+            AcmeStateMachine::new_with_issuer(test_config(tmp.path()), Box::new(DevNull), issuer);
+
+        // Tick 1: recovery_required → gauge = 1.
+        assert!(sm.tick_at(now_unix).await.is_err());
+        let metrics: HashSet<_> = crate::metrics::take_test_updates().into_iter().collect();
+        assert!(
+            metrics.contains("envoy_acme_account_state:a.example.test:1"),
+            "expected account_state=1 after first (recovery_required) tick but got: {metrics:?}"
+        );
+
+        // Tick 2: success → gauge drops back to 0.
+        sm.tick_at(now_unix + 1).await.unwrap();
+        let metrics: HashSet<_> = crate::metrics::take_test_updates().into_iter().collect();
+        assert!(
+            metrics.contains("envoy_acme_account_state:a.example.test:0"),
+            "expected account_state=0 after successful tick but got: {metrics:?}"
         );
     }
 
