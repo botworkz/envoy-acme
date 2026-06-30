@@ -196,6 +196,9 @@ impl TryFrom<RawAcmeConfig> for AcmeConfig {
                 "must not start with '.'"
             } else if value.chars().any(char::is_whitespace) {
                 "must not contain whitespace"
+            } else if !value.is_ascii() {
+                "non-ASCII characters are not yet supported; \
+                 convert to A-label form (e.g. xn--mnchen-3ya.example) or wait for IDNA support in a future release"
             } else {
                 continue;
             };
@@ -599,6 +602,40 @@ acme:
         assert!(
             msg.contains("domains[0]") && msg.contains("whitespace"),
             "error should mention whitespace domain, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn rejects_non_ascii_domain() {
+        let raw = base_yaml("directory_uri: https://example.invalid/directory")
+            .replace("domains: [example.test]", "domains: [münchen.example]");
+        let err = Config::from_bytes(raw.as_bytes()).expect_err("non-ASCII domain should fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("domains[0]") && msg.contains("non-ASCII") && msg.contains("A-label"),
+            "error should mention non-ASCII and A-label workaround, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn accepts_already_punycoded_domain() {
+        let raw = base_yaml("directory_uri: https://example.invalid/directory").replace(
+            "domains: [example.test]",
+            "domains: [xn--mnchen-3ya.example]",
+        );
+        Config::from_bytes(raw.as_bytes())
+            .expect("punycoded A-label domain should parse successfully");
+    }
+
+    #[test]
+    fn rejects_mixed_unicode_in_subdomain() {
+        let raw = base_yaml("directory_uri: https://example.invalid/directory")
+            .replace("domains: [example.test]", "domains: [api.müller.test]");
+        let err = Config::from_bytes(raw.as_bytes()).expect_err("unicode subdomain should fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("domains[0]") && msg.contains("non-ASCII"),
+            "error should mention domains[0] and non-ASCII, got: {msg}"
         );
     }
 

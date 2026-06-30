@@ -129,6 +129,7 @@ Notable config options in `acme:`:
 
 - `directory_ca_file` (optional): path to a PEM CA bundle to trust when connecting to the ACME directory (e.g. Pebble's self-signed CA in integration tests). Omit to use the system native roots.
 - `tick_seconds` (default `60`): how often the renewal state machine timer fires. Set lower in integration environments.
+- `domains`: non-ASCII (internationalized) domain names must currently be supplied in A-label (Punycode) form, e.g. `xn--mnchen-3ya.example` instead of `münchen.example`. Native IDN support is planned for a future release. Wildcards (`*.example.com`) are not supported (HTTP-01 challenges only).
 
 ## HTTP filter config (`filter_config`)
 
