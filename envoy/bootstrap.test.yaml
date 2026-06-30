@@ -13,7 +13,6 @@ bootstrap_extensions:
       "@type": type.googleapis.com/google.protobuf.StringValue
       value: |
         acme:
-          directory_cluster: acme_directory
           directory_uri: https://pebble:14000/dir
           # Trust Pebble's self-signed CA so instant-acme can verify the
           # directory TLS certificate.  Remove in production environments.

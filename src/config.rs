@@ -8,6 +8,7 @@ const LE_STAGING_URL: &str = "https://acme-staging-v02.api.letsencrypt.org/direc
 const LE_PRODUCTION_URL: &str = "https://acme-v02.api.letsencrypt.org/directory";
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
     pub acme: AcmeConfig,
     #[serde(default)]
@@ -31,6 +32,7 @@ pub enum DirectoryProfile {
 /// Raw deserialization form – `directory_uri` is optional so that
 /// `staging`/`production` profiles do not require it.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawAcmeConfig {
     #[serde(default)]
     directory_profile: Option<DirectoryProfile>,
@@ -301,6 +303,7 @@ impl Serialize for AcmeConfig {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct CertSinkConfig {
     #[serde(rename = "type")]
     pub sink_type: String,
@@ -317,6 +320,7 @@ pub enum Layout {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct LogConfig {
     #[serde(default = "default_log_level")]
     pub level: String,
@@ -881,5 +885,74 @@ acme:
     fn log_config_default_level_is_info() {
         let log = LogConfig::default();
         assert_eq!(log.level, "info");
+    }
+
+    // ── deny_unknown_fields rejection ────────────────────────────────────────
+
+    // Typo in a top-level acme field (directoty_uri instead of directory_uri)
+    #[test]
+    fn rejects_unknown_acme_field_typo() {
+        let raw = base_yaml("directoty_uri: https://example.invalid/directory");
+        let err =
+            Config::from_bytes(raw.as_bytes()).expect_err("typo'd acme field should be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("directoty_uri"),
+            "error should name the unknown field, got: {msg}"
+        );
+    }
+
+    // Typo in cert_sink field (celr_dir instead of cert_dir)
+    #[test]
+    fn rejects_unknown_cert_sink_field_typo() {
+        let raw = base_yaml("directory_uri: https://example.invalid/directory")
+            .replace("cert_dir: /tmp/certs", "celr_dir: /tmp/certs");
+        let err = Config::from_bytes(raw.as_bytes())
+            .expect_err("typo'd cert_sink field should be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("celr_dir"),
+            "error should name the unknown field, got: {msg}"
+        );
+    }
+
+    // Unknown top-level key alongside acme (aceme: instead of acme:)
+    #[test]
+    fn rejects_unknown_top_level_key() {
+        let raw = r#"
+acme:
+  directory_uri: https://example.invalid/directory
+  contact: mailto:admin@example.test
+  domains: [example.test]
+  state_dir: /tmp/acme
+  cert_sink:
+    type: filesystem
+    cert_dir: /tmp/certs
+aceme:
+  directory_uri: https://example.invalid/directory
+"#;
+        let err = Config::from_bytes(raw.as_bytes())
+            .expect_err("unknown top-level key should be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("aceme"),
+            "error should name the unknown field, got: {msg}"
+        );
+    }
+
+    // Unknown key inside cert_sink alongside valid keys
+    #[test]
+    fn rejects_unknown_cert_sink_extra_key() {
+        let raw = base_yaml("directory_uri: https://example.invalid/directory").replace(
+            "cert_dir: /tmp/certs",
+            "cert_dir: /tmp/certs\n    s3_bucket: my-bucket",
+        );
+        let err = Config::from_bytes(raw.as_bytes())
+            .expect_err("unknown cert_sink key should be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("s3_bucket"),
+            "error should name the unknown field, got: {msg}"
+        );
     }
 }
