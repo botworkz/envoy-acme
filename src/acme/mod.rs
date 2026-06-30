@@ -2026,6 +2026,64 @@ mod tests {
         assert_eq!(state, BackoffState::default());
     }
 
+    /// When `backoff.json` is corrupt and the parent directory is read-only,
+    /// the rename-for-quarantine fails.  The function must log an error and
+    /// return `BackoffState::default()`.
+    #[cfg(unix)]
+    #[traced_test]
+    #[tokio::test]
+    async fn load_backoff_corrupt_file_rename_failure_returns_default() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        // Write corrupt JSON so the parse step fails.
+        std::fs::write(tmp.path().join(BACKOFF_FILE), b"{not-json").unwrap();
+        // Make the parent directory read-only so the rename fails.
+        let dir_perms = std::fs::Permissions::from_mode(0o555);
+        std::fs::set_permissions(tmp.path(), dir_perms).unwrap();
+
+        let state = load_backoff(tmp.path()).await;
+
+        // Restore permissions so tempdir cleanup can remove files.
+        let restore_perms = std::fs::Permissions::from_mode(0o755);
+        std::fs::set_permissions(tmp.path(), restore_perms).unwrap();
+
+        assert_eq!(state, BackoffState::default());
+        assert!(
+            logs_contain("rename for quarantine also failed"),
+            "expected an error log about the failed rename"
+        );
+    }
+
+    /// When `backoff.json` exists but is not readable (mode 0o000), the
+    /// `tokio::fs::read` call returns a `PermissionDenied` error — a non-`NotFound`
+    /// error.  The function must log an error and return `BackoffState::default()`.
+    #[cfg(unix)]
+    #[traced_test]
+    #[tokio::test]
+    async fn load_backoff_permission_denied_returns_default() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        // Write valid JSON, then make the file unreadable.
+        let valid = serde_json::to_vec(&BackoffState::default()).unwrap();
+        std::fs::write(tmp.path().join(BACKOFF_FILE), &valid).unwrap();
+        let no_perms = std::fs::Permissions::from_mode(0o000);
+        std::fs::set_permissions(tmp.path().join(BACKOFF_FILE), no_perms).unwrap();
+
+        let state = load_backoff(tmp.path()).await;
+
+        // Restore permissions before the tempdir destructor tries to remove the file.
+        let restore_perms = std::fs::Permissions::from_mode(0o644);
+        std::fs::set_permissions(tmp.path().join(BACKOFF_FILE), restore_perms).unwrap();
+
+        assert_eq!(state, BackoffState::default());
+        assert!(
+            logs_contain("failed to read backoff.json"),
+            "expected an error log about the read failure"
+        );
+    }
+
     #[tokio::test]
     async fn publish_uses_default_domain_when_domains_empty() {
         let tmp = tempfile::tempdir().unwrap();
