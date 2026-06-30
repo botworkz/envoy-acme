@@ -67,7 +67,13 @@ struct RawAcmeConfig {
     /// Wall-clock budget for a single issuance attempt (HTTPS calls to the
     /// ACME directory included).  If the attempt does not complete within this
     /// many seconds the tick returns `AcmeError::Timeout` and the next tick
-    /// gets a fresh attempt.  Defaults to 120.  Must be in [5, 600].
+    /// gets a fresh attempt.  Defaults to 300.  Must be in [5, 600].
+    ///
+    /// The default leaves ~180 s of headroom above the worst-case polling
+    /// budget (2 × `MAX_POLLS × POLL_INTERVAL` = 120 s) to absorb realistic
+    /// CDN and CA-side latency against the Let's Encrypt production endpoint.
+    /// Lowering below ~200 s risks spurious timeouts on healthy issuance
+    /// attempts.
     #[serde(default = "default_issuance_timeout_seconds")]
     issuance_timeout_seconds: u64,
 }
@@ -266,7 +272,13 @@ pub struct AcmeConfig {
     /// Wall-clock budget for a single issuance attempt.  If the attempt does
     /// not complete within this many seconds the tick returns
     /// `AcmeError::Timeout` and the next tick gets a fresh attempt.
-    /// Defaults to 120.  Must be in [5, 600].
+    /// Defaults to 300.  Must be in [5, 600].
+    ///
+    /// The default leaves ~180 s of headroom above the worst-case polling
+    /// budget (2 × `MAX_POLLS × POLL_INTERVAL` = 120 s) to absorb realistic
+    /// CDN and CA-side latency against the Let's Encrypt production endpoint.
+    /// Lowering below ~200 s risks spurious timeouts on healthy issuance
+    /// attempts.
     #[serde(default = "default_issuance_timeout_seconds")]
     pub issuance_timeout_seconds: u64,
 }
@@ -352,7 +364,7 @@ fn default_tick_seconds() -> u64 {
 }
 
 fn default_issuance_timeout_seconds() -> u64 {
-    120
+    300
 }
 
 fn default_log_level() -> String {
@@ -798,10 +810,12 @@ acme:
     // ── issuance_timeout_seconds validation ──────────────────────────────────
 
     #[test]
-    fn issuance_timeout_defaults_to_120() {
+    fn issuance_timeout_defaults_to_300() {
+        // 300 s leaves ~180 s of headroom above the worst-case polling budget
+        // (2 × MAX_POLLS × POLL_INTERVAL = 120 s); see audit F-02 for rationale.
         let raw = base_yaml("directory_uri: https://example.invalid/directory");
         let cfg = Config::from_bytes(raw.as_bytes()).expect("yaml parse");
-        assert_eq!(cfg.acme.issuance_timeout_seconds, 120);
+        assert_eq!(cfg.acme.issuance_timeout_seconds, 300);
     }
 
     #[test]
