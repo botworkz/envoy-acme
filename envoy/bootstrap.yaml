@@ -63,7 +63,9 @@ static_resources:
               filter_name: acme_http
               filter_config:
                 "@type": type.googleapis.com/google.protobuf.StringValue
-                value: "{}"
+                value: |
+                  domains:
+                  - example.test
           - name: envoy.filters.http.router
             typed_config:
               "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
