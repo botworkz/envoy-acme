@@ -57,3 +57,17 @@ export ENVOY_ACME_ALLOW_CROSS_FS_DIRS=1
 ```
 
 This check is Unix-only.  On non-Unix targets it is a compile-time no-op.
+
+## `cert_dir` file permissions
+
+`FilesystemSink` writes `<first-domain>.secret.yaml` with mode `0o600` because
+the file embeds the private key as an `inline_string`.  Only the process user
+(typically `envoy`, uid `101`) can read it.
+
+If you need to inspect the embedded certificate manually, extract it with:
+
+```bash
+awk '/-----BEGIN CERTIFICATE-----/,/-----END CERTIFICATE-----/' \
+  /var/lib/envoy-acme/certs/a.example.test.secret.yaml \
+  | openssl x509 -noout -issuer -subject -ext subjectAltName
+```

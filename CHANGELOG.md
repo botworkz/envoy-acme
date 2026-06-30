@@ -8,6 +8,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **Breaking:** `FilesystemSink` now writes only `<first-domain>.secret.yaml`
+  with the certificate chain and private key embedded as `inline_string` values.
+  The standalone `<first-domain>.cert.pem` and `<first-domain>.key.pem` files
+  are no longer written.  Operators consuming those files outside of Envoy must
+  extract the PEM content from the inlined secret.yaml
+  (e.g. `awk '/-----BEGIN CERTIFICATE-----/,/-----END CERTIFICATE-----/' <file>`).
+  This change makes each renewal a single atomic filesystem event, eliminating
+  the cert/key mismatch window (`KEY_TYPE_MISMATCH`) previously observable by
+  Envoy's SDS directory watcher between sequential file writes.
+- The `secret.yaml` file is now written with mode `0o600` (previously `0o644`)
+  because it contains the private key inline.
 - **Breaking:** Unknown keys in `acme:`, `cert_sink:`, `log:`, and the HTTP
   filter `filter_config` are now **rejected at startup** with an error that
   names the offending field. Any config containing stale or mistyped keys
