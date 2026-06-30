@@ -308,6 +308,7 @@ dependencies = [
 name = "envoy_acme"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "base64",
  "envoy-proxy-dynamic-modules-rust-sdk",
  "http-body-util",

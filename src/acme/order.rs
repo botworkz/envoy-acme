@@ -1,10 +1,10 @@
 use instant_acme::{
-    Account, Authorization, AuthorizationStatus, Challenge, ChallengeType, Identifier, NewOrder,
-    OrderStatus,
+    Authorization, AuthorizationStatus, Challenge, ChallengeType, Identifier, NewOrder, OrderStatus,
 };
 use rcgen::{CertificateParams, KeyPair};
 use tokio::time::{sleep, Duration};
 
+use crate::acme::client::AcmeAccount;
 use crate::cert_sink::CertBundle;
 use crate::challenge_store;
 use crate::config::AcmeConfig;
@@ -118,7 +118,7 @@ fn assemble_bundle(
 // thread and uses the in-process HTTP filter for HTTP-01 challenge responses.
 pub async fn issue_certificate(
     config: &AcmeConfig,
-    account: &Account,
+    account: &dyn AcmeAccount,
 ) -> Result<CertBundle, AcmeError> {
     let identifiers = build_identifiers(&config.domains);
 
@@ -187,7 +187,9 @@ pub async fn issue_certificate(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use instant_acme::{Authorization, ChallengeType, Identifier};
+    use async_trait::async_trait;
+    use instant_acme::{Authorization, ChallengeType, Identifier, OrderState};
+    use std::sync::Mutex;
 
     // ── helpers for constructing Authorization fixtures via serde ──────────
 
@@ -382,5 +384,183 @@ mod tests {
             }
             other => panic!("expected OrderFailed, got {other:?}"),
         }
+    }
+
+    struct MockAcmeAccount {
+        new_order_result: Mutex<
+            Option<Result<Box<dyn crate::acme::client::AcmeOrder + Send>, instant_acme::Error>>,
+        >,
+    }
+
+    #[async_trait]
+    impl crate::acme::client::AcmeAccount for MockAcmeAccount {
+        async fn new_order(
+            &self,
+            _req: &NewOrder<'_>,
+        ) -> Result<Box<dyn crate::acme::client::AcmeOrder + Send>, instant_acme::Error> {
+            self.new_order_result
+                .lock()
+                .expect("mutex lock")
+                .take()
+                .expect("new_order called once")
+        }
+    }
+
+    struct MockAcmeOrder {
+        authorizations_response: Option<Result<Vec<Authorization>, instant_acme::Error>>,
+        refresh_statuses: Vec<OrderStatus>,
+        refresh_state: OrderState,
+        finalize_response: Option<Result<(), instant_acme::Error>>,
+        certificate_responses: Vec<Result<Option<String>, instant_acme::Error>>,
+    }
+
+    impl MockAcmeOrder {
+        fn with_statuses(statuses: Vec<OrderStatus>) -> Self {
+            Self {
+                authorizations_response: Some(Ok(vec![make_authz("valid", "example.test", &[])])),
+                refresh_statuses: statuses,
+                refresh_state: OrderState {
+                    status: OrderStatus::Pending,
+                    authorizations: Vec::new(),
+                    error: None,
+                    finalize: "https://acme.test/finalize".to_string(),
+                    certificate: Some("https://acme.test/cert".to_string()),
+                },
+                finalize_response: Some(Ok(())),
+                certificate_responses: vec![Ok(Some("CERT-CHAIN".to_string()))],
+            }
+        }
+    }
+
+    #[async_trait]
+    impl crate::acme::client::AcmeOrder for MockAcmeOrder {
+        async fn authorizations(&mut self) -> Result<Vec<Authorization>, instant_acme::Error> {
+            self.authorizations_response
+                .take()
+                .expect("authorizations called once")
+        }
+
+        fn key_authorization(&self, _challenge: &Challenge) -> instant_acme::KeyAuthorization {
+            panic!("key_authorization should not be called in these tests")
+        }
+
+        async fn set_challenge_ready(&mut self, _url: &str) -> Result<(), instant_acme::Error> {
+            Ok(())
+        }
+
+        async fn refresh(&mut self) -> Result<&OrderState, instant_acme::Error> {
+            if let Some(status) = self.refresh_statuses.first().copied() {
+                self.refresh_state.status = status;
+                self.refresh_statuses.remove(0);
+            }
+            Ok(&self.refresh_state)
+        }
+
+        async fn finalize(&mut self, _csr_der: &[u8]) -> Result<(), instant_acme::Error> {
+            self.finalize_response.take().expect("finalize called once")
+        }
+
+        async fn certificate(&mut self) -> Result<Option<String>, instant_acme::Error> {
+            if self.certificate_responses.is_empty() {
+                return Ok(None);
+            }
+            self.certificate_responses.remove(0)
+        }
+    }
+
+    fn make_config() -> AcmeConfig {
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        AcmeConfig {
+            directory_profile: None,
+            directory_uri: "https://acme.test/directory".to_string(),
+            directory_ca_file: None,
+            contact: "mailto:test@example.test".to_string(),
+            domains: vec!["example.test".to_string()],
+            renewal_window_days: 30,
+            state_dir: tempdir.path().to_path_buf(),
+            cert_sink: crate::config::CertSinkConfig {
+                sink_type: "files".to_string(),
+                cert_dir: tempdir.path().to_path_buf(),
+                layout: crate::config::Layout::PerDomain,
+            },
+            tick_seconds: 60,
+            issuance_timeout_seconds: 120,
+        }
+    }
+
+    #[tokio::test]
+    async fn issue_certificate_success_returns_bundle() {
+        let account = MockAcmeAccount {
+            new_order_result: Mutex::new(Some(Ok(Box::new(MockAcmeOrder::with_statuses(vec![
+                OrderStatus::Ready,
+            ]))))),
+        };
+        let bundle = issue_certificate(&make_config(), &account)
+            .await
+            .expect("issue_certificate should succeed");
+        assert_eq!(bundle.cert_pem, b"CERT-CHAIN".to_vec());
+        assert!(!bundle.key_pem.is_empty());
+    }
+
+    #[tokio::test]
+    async fn issue_certificate_new_order_error_is_propagated() {
+        let account = MockAcmeAccount {
+            new_order_result: Mutex::new(Some(Err(instant_acme::Error::Str("new-order-error")))),
+        };
+        let err = issue_certificate(&make_config(), &account)
+            .await
+            .expect_err("expected failure");
+        assert!(matches!(
+            err,
+            AcmeError::Protocol(instant_acme::Error::Str("new-order-error"))
+        ));
+    }
+
+    #[tokio::test]
+    async fn issue_certificate_refresh_invalid_returns_order_failed() {
+        let account = MockAcmeAccount {
+            new_order_result: Mutex::new(Some(Ok(Box::new(MockAcmeOrder::with_statuses(vec![
+                OrderStatus::Invalid,
+            ]))))),
+        };
+        let err = issue_certificate(&make_config(), &account)
+            .await
+            .expect_err("expected failure");
+        assert!(matches!(
+            err,
+            AcmeError::OrderFailed(ref m) if m == "timed out waiting for ready authorization"
+        ));
+    }
+
+    #[tokio::test]
+    async fn issue_certificate_finalize_error_is_propagated() {
+        let mut order = MockAcmeOrder::with_statuses(vec![OrderStatus::Ready]);
+        order.finalize_response = Some(Err(instant_acme::Error::Str("finalize-error")));
+        let account = MockAcmeAccount {
+            new_order_result: Mutex::new(Some(Ok(Box::new(order)))),
+        };
+        let err = issue_certificate(&make_config(), &account)
+            .await
+            .expect_err("expected failure");
+        assert!(matches!(
+            err,
+            AcmeError::Protocol(instant_acme::Error::Str("finalize-error"))
+        ));
+    }
+
+    #[tokio::test]
+    async fn issue_certificate_certificate_error_is_propagated() {
+        let mut order = MockAcmeOrder::with_statuses(vec![OrderStatus::Ready]);
+        order.certificate_responses = vec![Err(instant_acme::Error::Str("certificate-error"))];
+        let account = MockAcmeAccount {
+            new_order_result: Mutex::new(Some(Ok(Box::new(order)))),
+        };
+        let err = issue_certificate(&make_config(), &account)
+            .await
+            .expect_err("expected failure");
+        assert!(matches!(
+            err,
+            AcmeError::Protocol(instant_acme::Error::Str("certificate-error"))
+        ));
     }
 }
