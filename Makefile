@@ -19,6 +19,7 @@ coverage:
 	cargo tarpaulin \
 		--workspace \
 		--exclude-files 'src/lib.rs' \
+		--exclude-files 'src/test_stubs.rs' \
 		--timeout 180 \
 		--out Html \
 		--output-dir target/tarpaulin \
