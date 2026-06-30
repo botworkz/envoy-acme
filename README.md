@@ -52,6 +52,13 @@ See:
 
 Config bytes are parsed as JSON first, then YAML.
 
+> **Breaking change (v0.3):** Unknown keys in `acme:`, `cert_sink:`, `log:`, and
+> the HTTP filter `filter_config` are now **rejected at startup** with an error
+> that names the offending field.  Any config containing stale or mistyped keys
+> (e.g. `directory_cluster:`, `celr_dir:`) will fail to load.  This is
+> intentional — silent key-dropping hides typos and stale fields from operators.
+> Update your configs to remove any unrecognised keys before upgrading to v0.3.
+
 Notable config options in `acme:`:
 
 - `directory_profile` (optional): selects a known ACME directory by name.
