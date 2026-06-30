@@ -1242,6 +1242,8 @@ mod tests {
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn non_rate_limited_error_does_not_escalate_backoff() {
+        // Intentionally hold the global metrics test lock across the async tick
+        // so metric updates remain isolated from other tests.
         let _guard = crate::metrics::test_lock();
         crate::metrics::reset_test_state();
 
@@ -1352,7 +1354,7 @@ mod tests {
             AcmeStateMachine::new_with_issuer(test_config(tmp.path()), Box::new(DevNull), issuer);
         sm.heartbeat_every_ticks = 1;
 
-        let _ = sm.tick_at(1_000_000).await;
+        assert!(sm.tick_at(1_000_000).await.is_err());
 
         assert!(logs_contain("envoy-acme heartbeat"));
     }
