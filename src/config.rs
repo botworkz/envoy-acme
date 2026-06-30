@@ -199,8 +199,27 @@ impl TryFrom<RawAcmeConfig> for AcmeConfig {
             .map(|(i, value)| normalise_domain(i, value))
             .collect::<Result<Vec<_>, _>>()?;
 
-        if raw.contact.trim().is_empty() {
+        let contact = raw.contact.trim().to_string();
+        if contact.is_empty() {
             return Err("acme.contact must be non-empty".to_string());
+        }
+        if !contact.starts_with("mailto:") {
+            return Err(format!(
+                "acme.contact must be a mailto: URI per RFC 8555 §7.3 \
+                 (got {contact:?}); e.g. \"mailto:admin@example.test\""
+            ));
+        }
+        let address = &contact["mailto:".len()..];
+        if address.is_empty() {
+            return Err("acme.contact has a mailto: prefix but no address; \
+                 e.g. \"mailto:admin@example.test\""
+                .to_string());
+        }
+        if !address.contains('@') || address.chars().any(char::is_whitespace) {
+            return Err(format!(
+                "acme.contact mailto: address {address:?} is not a valid email \
+                 (must contain '@' and no whitespace)"
+            ));
         }
 
         if !(1..=365).contains(&raw.renewal_window_days) {
@@ -221,7 +240,7 @@ impl TryFrom<RawAcmeConfig> for AcmeConfig {
             directory_profile: raw.directory_profile,
             directory_uri,
             directory_ca_file: raw.directory_ca_file,
-            contact: raw.contact,
+            contact,
             domains: normalised_domains,
             renewal_window_days: raw.renewal_window_days,
             state_dir: raw.state_dir,
@@ -672,6 +691,120 @@ acme:
             msg.contains("contact") && msg.contains("non-empty"),
             "error should mention non-empty contact, got: {msg}"
         );
+    }
+
+    #[test]
+    fn contact_bare_email_rejected() {
+        let raw = base_yaml("directory_uri: https://example.invalid/directory").replace(
+            "contact: mailto:admin@example.test",
+            "contact: admin@example.test",
+        );
+        let err =
+            Config::from_bytes(raw.as_bytes()).expect_err("bare email contact should be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("mailto:") && msg.contains("RFC 8555"),
+            "error should mention mailto: and RFC 8555, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn contact_wrong_scheme_rejected() {
+        let raw = base_yaml("directory_uri: https://example.invalid/directory").replace(
+            "contact: mailto:admin@example.test",
+            "contact: ftp://admin@example.test",
+        );
+        let err = Config::from_bytes(raw.as_bytes())
+            .expect_err("wrong-scheme contact should be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("mailto:"),
+            "error should mention mailto:, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn contact_mailto_with_space_rejected() {
+        let raw = base_yaml("directory_uri: https://example.invalid/directory").replace(
+            "contact: mailto:admin@example.test",
+            "contact: \"mailto admin@example.test\"",
+        );
+        let err = Config::from_bytes(raw.as_bytes())
+            .expect_err("space-instead-of-colon contact should be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("mailto:"),
+            "error should mention mailto:, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn contact_mailto_empty_address_rejected() {
+        let raw = base_yaml("directory_uri: https://example.invalid/directory")
+            .replace("contact: mailto:admin@example.test", "contact: \"mailto:\"");
+        let err = Config::from_bytes(raw.as_bytes())
+            .expect_err("mailto: with no address should be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("mailto:") && (msg.contains("address") || msg.contains("empty")),
+            "error should mention empty address, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn contact_mailto_no_at_rejected() {
+        let raw = base_yaml("directory_uri: https://example.invalid/directory").replace(
+            "contact: mailto:admin@example.test",
+            "contact: mailto:admin-at-example.test",
+        );
+        let err =
+            Config::from_bytes(raw.as_bytes()).expect_err("mailto: with no @ should be rejected");
+        let msg = err.to_string();
+        assert!(msg.contains('@'), "error should mention '@', got: {msg}");
+    }
+
+    #[test]
+    fn contact_mailto_whitespace_in_address_rejected() {
+        let raw = base_yaml("directory_uri: https://example.invalid/directory").replace(
+            "contact: mailto:admin@example.test",
+            "contact: \"mailto:admin @example.test\"",
+        );
+        let err = Config::from_bytes(raw.as_bytes())
+            .expect_err("mailto: with whitespace in address should be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("whitespace"),
+            "error should mention whitespace, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn contact_valid_mailto_accepted() {
+        let raw = base_yaml("directory_uri: https://example.invalid/directory");
+        let cfg = Config::from_bytes(raw.as_bytes()).expect("valid mailto contact should parse");
+        assert_eq!(cfg.acme.contact, "mailto:admin@example.test");
+    }
+
+    #[test]
+    fn contact_mailto_with_subaddress_accepted() {
+        let raw = base_yaml("directory_uri: https://example.invalid/directory").replace(
+            "contact: mailto:admin@example.test",
+            "contact: mailto:admin+acme@example.test",
+        );
+        let cfg =
+            Config::from_bytes(raw.as_bytes()).expect("plus-addressed mailto contact should parse");
+        assert_eq!(cfg.acme.contact, "mailto:admin+acme@example.test");
+    }
+
+    #[test]
+    fn contact_mailto_whitespace_trimmed() {
+        let raw = base_yaml("directory_uri: https://example.invalid/directory").replace(
+            "contact: mailto:admin@example.test",
+            "contact: \"  mailto:admin@example.test  \"",
+        );
+        let cfg = Config::from_bytes(raw.as_bytes())
+            .expect("padded-whitespace mailto contact should parse after trim");
+        assert_eq!(cfg.acme.contact, "mailto:admin@example.test");
     }
 
     #[test]
