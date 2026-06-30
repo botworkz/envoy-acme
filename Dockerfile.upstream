@@ -1,0 +1,29 @@
+FROM debian:bookworm-slim AS fetch
+ARG TARGETARCH
+RUN --mount=type=tmpfs,target=/var/cache/apt \
+    --mount=type=tmpfs,target=/var/lib/apt/lists \
+    apt-get -qq update \
+ && apt-get -qq install -y --no-install-recommends ca-certificates curl \
+ && test -n "${TARGETARCH}" || (echo "TARGETARCH build arg must be set (enable BuildKit and set --platform)" >&2 && exit 1) \
+ && BASE_URL="https://github.com/envoyproxy/toolshed/releases/download/bins-v0.1.58" \
+ && BIN="echo-0.1.0-${TARGETARCH}" \
+ && curl -fsSL "${BASE_URL}/${BIN}" -o "/tmp/${BIN}" \
+ && curl -fsSL "${BASE_URL}/checksums.txt.asc" -o /tmp/checksums.txt.asc \
+ && cd /tmp \
+ && awk -v bin="${BIN}" '$2 == bin { print; found=1 } END { exit !found }' checksums.txt.asc > "${BIN}.sha256" \
+ && sha256sum -c "${BIN}.sha256" \
+ && install -D -m 0755 "/tmp/${BIN}" /out/echo
+
+
+FROM gcr.io/distroless/cc-debian12:nonroot
+COPY --from=fetch /out/echo /usr/local/bin/echo
+COPY <<EOF /etc/echo.yaml
+hostname: upstream
+listeners:
+  http:
+    host: "0.0.0.0"
+    port: 8080
+EOF
+EXPOSE 8080
+ENTRYPOINT ["/usr/local/bin/echo"]
+CMD ["-c", "/etc/echo.yaml"]

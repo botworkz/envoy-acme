@@ -16,26 +16,33 @@ RUN cargo build --release --target=x86_64-unknown-linux-gnu
 # integration-test bootstrap (a.example.test / b.example.test).
 # FilesystemSink overwrites these atomically on first ACME success;
 # Envoy's file watcher reloads the new material in place.
+# Cert and key are embedded as inline_string so the secret.yaml is the only
+# file envoy's SDS watcher observes on each renewal (single atomic event).
 RUN mkdir -p /sds-placeholder \
  && for NAME in example.test a.example.test b.example.test; do \
-      openssl req -x509 -newkey rsa:2048 -nodes \
-        -keyout /sds-placeholder/${NAME}.key.pem \
-        -out    /sds-placeholder/${NAME}.cert.pem \
-        -days 1 -subj "/CN=${NAME}" \
-        -addext "subjectAltName=DNS:${NAME}" \
-      && chmod 0644 /sds-placeholder/${NAME}.key.pem \
-      && RES_NAME="$(echo "${NAME}" | tr '.-' '__')_tls" \
-      && printf '%s\n' \
-           'resources:' \
-           '  - "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.Secret' \
-           "    name: ${RES_NAME}" \
-           '    tls_certificate:' \
-           '      certificate_chain:' \
-           "        filename: /var/lib/envoy-acme/certs/${NAME}.cert.pem" \
-           '      private_key:' \
-           "        filename: /var/lib/envoy-acme/certs/${NAME}.key.pem" \
-         > /sds-placeholder/${NAME}.secret.yaml ; \
-    done
+     openssl req -x509 -newkey rsa:2048 -nodes \
+       -keyout /tmp/${NAME}.key.pem \
+       -out    /tmp/${NAME}.cert.pem \
+       -days 1 -subj "/CN=${NAME}" \
+       -addext "subjectAltName=DNS:${NAME}" \
+     && RES_NAME="$(echo "${NAME}" | tr '.-' '__')_tls" \
+     && { \
+          printf '%s\n' \
+            'resources:' \
+            '  - "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.Secret' \
+            "    name: ${RES_NAME}" \
+            '    tls_certificate:' \
+            '      certificate_chain:' \
+            '        inline_string: |' ; \
+          sed 's/^/          /' /tmp/${NAME}.cert.pem ; \
+          printf '%s\n' \
+            '      private_key:' \
+            '        inline_string: |' ; \
+          sed 's/^/          /' /tmp/${NAME}.key.pem ; \
+        } > /sds-placeholder/${NAME}.secret.yaml \
+     && chmod 0600 /sds-placeholder/${NAME}.secret.yaml ; \
+    done \
+ && rm -f /tmp/*.pem
 
 FROM envoyproxy/envoy:v1.38-latest
 # ENVOY_UID is intentionally not used in the chown below; it exists as an
