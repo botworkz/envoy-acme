@@ -24,6 +24,14 @@ ignore = [
     # archived the repo but no breaking API change is needed to migrate.
     # Track: https://github.com/rustls/pemfile/issues/61
     { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile is unmaintained but no safe drop-in upgrade exists yet; tracked for future migration to rustls-pki-types" },
+
+    # serde_yaml was deprecated by upstream in 2024 (final release
+    # 0.9.34+deprecated). No RUSTSEC advisory exists yet, but we list
+    # the crate explicitly so the deprecation is documented in policy
+    # rather than implicit. Used in two call sites: config-load YAML
+    # fallback (src/config.rs) and SDS secret YAML generation
+    # (src/cert_sink/filesystem.rs). Migration tracked in #133.
+    { crate = "serde_yaml@0.9.34", reason = "upstream deprecated 2024-03; migration to serde_yml or a hand-rolled SDS writer tracked in #133" },
 ]
 
 # ── License checks ────────────────────────────────────────────────────────────
