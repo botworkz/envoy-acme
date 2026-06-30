@@ -489,10 +489,12 @@ mod tests {
 
     #[test]
     fn duration_to_seconds_cases() {
+        // The function uses ceiling division: any non-zero subsecond nanos
+        // count as a full extra second (matches the histogram bucket intent).
         assert_eq!(duration_to_seconds(Duration::ZERO), 0);
-        assert_eq!(duration_to_seconds(Duration::from_nanos(1)), 1); // rounds up
-        assert_eq!(duration_to_seconds(Duration::from_secs(1)), 1);
-        assert_eq!(duration_to_seconds(Duration::from_millis(1500)), 2); // rounds up
+        assert_eq!(duration_to_seconds(Duration::from_nanos(1)), 1); // 0s + 1ns → ceil → 1
+        assert_eq!(duration_to_seconds(Duration::from_secs(1)), 1); // exact, no subsec nanos
+        assert_eq!(duration_to_seconds(Duration::from_millis(1500)), 2); // 1s + 500ms → ceil → 2
         assert_eq!(
             duration_to_seconds(Duration::new(u64::MAX, 0)),
             u64::MAX
@@ -500,7 +502,7 @@ mod tests {
         assert_eq!(
             duration_to_seconds(Duration::new(u64::MAX, 1)),
             u64::MAX
-        ); // saturating_add saturates
+        ); // saturating_add saturates on overflow
     }
 
     // ── on_scheduled wrong event_id ───────────────────────────────────────────
