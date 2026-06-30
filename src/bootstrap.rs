@@ -376,6 +376,11 @@ mod tests {
             })
             .return_once(|_, _| Ok(EnvoyGaugeVecId(4)));
         envoy_config
+            .expect_define_gauge_vec()
+            .once()
+            .withf(|name, labels| name == "envoy_acme_account_state" && labels == ["domain"])
+            .return_once(|_, _| Ok(EnvoyGaugeVecId(5)));
+        envoy_config
             .expect_define_histogram()
             .once()
             .withf(|name| name == "envoy_acme_issuance_duration_seconds")
