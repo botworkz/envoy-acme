@@ -387,14 +387,17 @@ fn normalise_domain(i: usize, value: &str) -> Result<String, String> {
     // to_ascii is idempotent on already-A-label input.
     // Parameters match the CA/Browser Forum Baseline Requirements profile:
     //   AsciiDenyList::STD3  — rejects underscores and other STD3-invalid chars
-    //   Hyphens::Allow       — no hyphen-position check (matches original behaviour)
+    //   Hyphens::Check       — enforces RFC 5891 §4.2.3.1 / BR §7.1.4.2:
+    //                          rejects leading/trailing hyphens and labels where
+    //                          positions 3–4 are both `-` (unless `xn--` A-label,
+    //                          which is decoded to Unicode before the check)
     //   DnsLength::Verify    — per-label ≤63, total ≤253 octets
     // Transitional processing is always off in idna 1.x.
     idna::uts46::Uts46::new()
         .to_ascii(
             value.as_bytes(),
             idna::AsciiDenyList::STD3,
-            idna::uts46::Hyphens::Allow,
+            idna::uts46::Hyphens::Check,
             idna::uts46::DnsLength::Verify,
         )
         .map(|cow| cow.into_owned())
@@ -1114,6 +1117,61 @@ aceme:
             msg.contains("domains[0]") && msg.contains("IDNA"),
             "error should mention the index and IDNA, got: {msg}"
         );
+    }
+
+    // A label with `--` in positions 3–4 that is not an `xn--` A-label is rejected
+    // (RFC 5891 §4.2.3.1 / CA/Browser Forum BR §7.1.4.2).
+    #[test]
+    fn idn_rejects_double_hyphen_third_fourth() {
+        let raw = base_yaml("directory_uri: https://example.invalid/directory")
+            .replace("domains: [example.test]", "domains: [ab--cd.example]");
+        let err = Config::from_bytes(raw.as_bytes())
+            .expect_err("label with -- in positions 3-4 should fail IDNA hyphen check");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("domains[0]") && msg.contains("IDNA"),
+            "error should mention the index and IDNA, got: {msg}"
+        );
+    }
+
+    // A label starting with `--` is rejected (leading-hyphen + positions 3-4 violation).
+    #[test]
+    fn idn_rejects_double_hyphen_at_label_start() {
+        let raw = base_yaml("directory_uri: https://example.invalid/directory")
+            .replace("domains: [example.test]", "domains: [--abc.example]");
+        let err = Config::from_bytes(raw.as_bytes())
+            .expect_err("label starting with -- should fail IDNA hyphen check");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("domains[0]") && msg.contains("IDNA"),
+            "error should mention the index and IDNA, got: {msg}"
+        );
+    }
+
+    // An `xn--`-prefixed A-label is accepted (the RFC 5891 §4.2.3.1 exception).
+    // This is the same domain covered by idn_a_label_passes_through_unchanged;
+    // this test explicitly documents that CheckThirdAndFourth does not break A-labels.
+    #[test]
+    fn idn_accepts_xn_prefixed_a_label() {
+        let raw = base_yaml("directory_uri: https://example.invalid/directory").replace(
+            "domains: [example.test]",
+            "domains: [xn--mnchen-3ya.example]",
+        );
+        let cfg = Config::from_bytes(raw.as_bytes())
+            .expect("xn-- A-label with -- in positions 3-4 must be accepted");
+        assert_eq!(cfg.acme.domains[0], "xn--mnchen-3ya.example");
+    }
+
+    // A label with `--` in positions 4–5 (not 3–4) is accepted — proves we do not
+    // over-reject.  In "foo--bar" the hyphens are at indices 3 and 4 (0-based),
+    // i.e. the *fourth* and *fifth* characters, so the RFC 5891 rule is not triggered.
+    #[test]
+    fn idn_accepts_double_hyphen_in_other_positions() {
+        let raw = base_yaml("directory_uri: https://example.invalid/directory")
+            .replace("domains: [example.test]", "domains: [foo--bar.example]");
+        let cfg = Config::from_bytes(raw.as_bytes())
+            .expect("label with -- in positions 4-5 should be accepted");
+        assert_eq!(cfg.acme.domains[0], "foo--bar.example");
     }
 
     // A single label longer than 63 octets after normalisation is rejected.
