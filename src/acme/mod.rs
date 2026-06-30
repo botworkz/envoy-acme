@@ -4,6 +4,8 @@ pub mod backoff;
 pub(crate) mod client;
 pub mod order;
 pub mod renewal;
+#[cfg(test)]
+pub(crate) mod account_test_server;
 
 use std::path::Path;
 use std::pin::Pin;

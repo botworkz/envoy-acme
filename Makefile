@@ -20,6 +20,7 @@ coverage:
 		--workspace \
 		--exclude-files 'src/lib.rs' \
 		--exclude-files 'src/test_stubs.rs' \
+		--exclude-files 'src/acme/account_test_server.rs' \
 		--timeout 180 \
 		--out Html \
 		--output-dir target/tarpaulin \
