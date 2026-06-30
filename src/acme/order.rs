@@ -194,6 +194,24 @@ mod tests {
     use std::collections::VecDeque;
     use std::sync::Mutex;
 
+    // ── Known test gap: Register branch of issue_certificate (lines 139-145) ──
+    //
+    // The Register branch (key_authorization → challenge_store::insert →
+    // set_challenge_ready) is NOT covered by unit tests because
+    // `instant_acme::KeyAuthorization` cannot be constructed from outside the
+    // crate:
+    //   - It has no public constructor.
+    //   - It does not implement `Deserialize` (no `#[derive(Deserialize)]`).
+    //   - The only factory is `Order::key_authorization`, which is the real SDK
+    //     method and requires a live ACME account key.
+    //
+    // Resolution: the Register branch is exercised by the Pebble integration job.
+    // Unit-test coverage requires an upstream instant-acme change (e.g. a
+    // `#[cfg(test)] pub fn new_for_test(s: String) -> Self` constructor, or a
+    // `Deserialize` impl). Until that lands, MockAcmeOrder::key_authorization
+    // panics to make any accidental call visible, and the branch stays uncovered
+    // in unit-test reports.
+
     // ── helpers for constructing Authorization fixtures via serde ──────────
 
     fn make_authz(status: &str, domain: &str, challenge_types: &[&str]) -> Authorization {

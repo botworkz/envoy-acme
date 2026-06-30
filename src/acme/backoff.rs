@@ -138,6 +138,9 @@ pub fn compute_next_retry_at(now_unix: i64, consecutive: u32) -> i64 {
     let jitter: i64 = if jitter_max > 0 {
         rand::thread_rng().gen_range(-jitter_max..=jitter_max)
     } else {
+        // jitter_max == 0 is unreachable from the public API: BASE_DELAY_SECS = 60,
+        // JITTER_FRACTION = 0.20, so jitter_max is always >= 12. Kept as defensive
+        // code; not exercised by tests.
         0
     };
 
