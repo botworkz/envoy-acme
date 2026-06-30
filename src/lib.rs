@@ -1,3 +1,7 @@
+// This file is excluded from cargo tarpaulin coverage; see CONTRIBUTING.md
+// section "Coverage exclusions" for the policy. The functions below are
+// FFI entry points loaded by Envoy and cannot be invoked from a Rust
+// unit test.
 #![allow(clippy::incompatible_msrv)]
 // The `declare_all_init_functions!` macro from envoy-proxy-dynamic-modules-rust-sdk
 // performs function-pointer comparisons internally for duplicate-registration detection;
