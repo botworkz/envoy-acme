@@ -250,6 +250,46 @@ gh attestation verify \
   --repo botworkz/envoy-acme
 ```
 
+## Security
+
+### `state_dir` permissions
+
+envoy-acme expects `state_dir` to be mode `0700` (owner-only).  The directory
+holds `account.json` (the ACME account EC private key), `backoff.json`, and
+`bundle.ok`.  A world- or group-readable parent allows other local users to read
+`account.json` and observe operational state.
+
+At startup, if `state_dir` has any `g+r`, `g+w`, `g+x`, `o+r`, `o+w`, or
+`o+x` bits set, envoy-acme logs a single `WARN` message naming the offending
+mode bits and the recommended remediation:
+
+```
+WARN envoy-acme: state_dir is group- or world-accessible; ...
+     Recommended: chmod 0700 /var/lib/envoy-acme.
+```
+
+To fix, run:
+
+```bash
+chmod 0700 /var/lib/envoy-acme   # substitute your state_dir path
+```
+
+If looser permissions are intentional (e.g. a monitoring agent reads state
+files), set the environment variable `ENVOY_ACME_ALLOW_INSECURE_STATE_DIR=1`
+to suppress the warning:
+
+```yaml
+# envoy bootstrap — static_resources or layered runtime
+admin:
+  ...
+```
+
+```bash
+export ENVOY_ACME_ALLOW_INSECURE_STATE_DIR=1
+```
+
+This check is Unix-only.  On non-Unix targets it is a compile-time no-op.
+
 ## Known limitations
 
 - HTTP-01 only.
