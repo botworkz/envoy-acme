@@ -17,6 +17,7 @@ enum MetricUpdate {
     ConsecutiveFailures { domain: String, count: u32 },
     NextRetryAt { domain: String, unix_ts: u64 },
     CertNotAfter { domain: String, unix_ts: u64 },
+    AccountState { domain: String, state: u64 },
     IssuanceDuration { seconds: u64 },
 }
 
@@ -33,6 +34,7 @@ impl MetricUpdate {
             }
             MetricUpdate::NextRetryAt { domain, .. } => Some(("next_retry_at", domain.as_str())),
             MetricUpdate::CertNotAfter { domain, .. } => Some(("cert_not_after", domain.as_str())),
+            MetricUpdate::AccountState { domain, .. } => Some(("account_state", domain.as_str())),
             MetricUpdate::IssuanceTotal { .. } | MetricUpdate::IssuanceDuration { .. } => None,
         }
     }
@@ -43,6 +45,7 @@ struct MetricIds {
     consecutive_failures: EnvoyGaugeVecId,
     next_retry_at: EnvoyGaugeVecId,
     cert_not_after: EnvoyGaugeVecId,
+    account_state: EnvoyGaugeVecId,
     issuance_duration: EnvoyHistogramId,
 }
 
@@ -69,6 +72,7 @@ pub(crate) fn init(
             .define_gauge_vec("envoy_acme_next_retry_at_seconds", &["domain"])?,
         cert_not_after: envoy_config
             .define_gauge_vec("envoy_acme_cert_not_after_seconds", &["domain"])?,
+        account_state: envoy_config.define_gauge_vec("envoy_acme_account_state", &["domain"])?,
         issuance_duration: envoy_config.define_histogram("envoy_acme_issuance_duration_seconds")?,
     };
 
@@ -162,6 +166,13 @@ pub(crate) fn set_cert_not_after(domain: &str, unix_ts: u64) {
     });
 }
 
+pub(crate) fn set_account_state(domain: &str, state: u64) {
+    enqueue(MetricUpdate::AccountState {
+        domain: domain.to_string(),
+        state,
+    });
+}
+
 fn enqueue(update: MetricUpdate) {
     enqueue_many(vec![update]);
 }
@@ -215,6 +226,9 @@ fn apply_update(
         }
         MetricUpdate::CertNotAfter { domain, unix_ts } => {
             envoy_config.set_gauge_vec(ids.cert_not_after, &[domain.as_str()], unix_ts)
+        }
+        MetricUpdate::AccountState { domain, state } => {
+            envoy_config.set_gauge_vec(ids.account_state, &[domain.as_str()], state)
         }
         MetricUpdate::IssuanceDuration { seconds } => {
             envoy_config.record_histogram_value(ids.issuance_duration, seconds)
@@ -296,6 +310,9 @@ pub(crate) fn take_test_updates() -> Vec<String> {
                 MetricUpdate::CertNotAfter { domain, unix_ts } => {
                     format!("envoy_acme_cert_not_after_seconds:{domain}:{unix_ts}")
                 }
+                MetricUpdate::AccountState { domain, state } => {
+                    format!("envoy_acme_account_state:{domain}:{state}")
+                }
                 MetricUpdate::IssuanceDuration { seconds } => {
                     format!("envoy_acme_issuance_duration_seconds:{seconds}")
                 }
@@ -335,7 +352,7 @@ mod tests {
         EnvoyCounterVecId, EnvoyGaugeVecId, EnvoyHistogramId,
     };
 
-    /// Build the standard init mock: registers all five metrics and wraps
+    /// Build the standard init mock: registers all six metrics and wraps
     /// `scheduler` inside `new_scheduler`. `commit_times` is how many times
     /// `scheduler.commit` should be called (one per `enqueue_many` invocation).
     fn make_init_mock(commit_times: usize) -> MockEnvoyBootstrapExtensionConfig {
@@ -371,10 +388,15 @@ mod tests {
             })
             .return_once(|_, _| Ok(EnvoyGaugeVecId(4)));
         envoy_config
+            .expect_define_gauge_vec()
+            .once()
+            .withf(|name, labels| name == "envoy_acme_account_state" && labels == ["domain"])
+            .return_once(|_, _| Ok(EnvoyGaugeVecId(5)));
+        envoy_config
             .expect_define_histogram()
             .once()
             .withf(|name| name == "envoy_acme_issuance_duration_seconds")
-            .return_once(|_| Ok(EnvoyHistogramId(5)));
+            .return_once(|_| Ok(EnvoyHistogramId(6)));
         envoy_config
             .expect_new_scheduler()
             .once()
@@ -412,7 +434,7 @@ mod tests {
             .returning(|_, _, _| Ok(()));
         cfg2.expect_record_histogram_value()
             .once()
-            .withf(|id, val| *id == EnvoyHistogramId(5) && *val == 2)
+            .withf(|id, val| *id == EnvoyHistogramId(6) && *val == 2)
             .returning(|_, _| Ok(()));
 
         on_scheduled(&mut cfg2, METRICS_EVENT_ID);
@@ -437,7 +459,7 @@ mod tests {
             .returning(|_, _, _| Ok(()));
         cfg2.expect_record_histogram_value()
             .once()
-            .withf(|id, val| *id == EnvoyHistogramId(5) && *val == 3)
+            .withf(|id, val| *id == EnvoyHistogramId(6) && *val == 3)
             .returning(|_, _| Ok(()));
 
         on_scheduled(&mut cfg2, METRICS_EVENT_ID);
@@ -500,6 +522,27 @@ mod tests {
             .once()
             .withf(|id, labels, val| {
                 *id == EnvoyGaugeVecId(4) && *labels == ["d.example"] && *val == 1_700_000_000
+            })
+            .returning(|_, _, _| Ok(()));
+
+        on_scheduled(&mut cfg2, METRICS_EVENT_ID);
+    }
+
+    #[test]
+    fn apply_update_account_state() {
+        let _guard = test_lock();
+        reset_test_state();
+
+        let mut init_cfg = make_init_mock(1);
+        init(&mut init_cfg).unwrap();
+
+        set_account_state("d.example", 1);
+
+        let mut cfg2 = MockEnvoyBootstrapExtensionConfig::new();
+        cfg2.expect_set_gauge_vec()
+            .once()
+            .withf(|id, labels, val| {
+                *id == EnvoyGaugeVecId(5) && *labels == ["d.example"] && *val == 1
             })
             .returning(|_, _, _| Ok(()));
 
