@@ -223,7 +223,6 @@ mod tests {
     #[test]
     fn build_custom_client_loads_pem() {
         install_ring();
-        // Use the vendored pebble CA cert if available; otherwise skip.
         let cert_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("config/pebble-certs/pebble.minica.pem");
         if !cert_path.exists() {
@@ -238,9 +237,6 @@ mod tests {
     /// resulting JSON can be deserialised by instant-acme without error.
     #[test]
     fn filter_strips_tokenless_challenge_and_authz_parses() {
-        // Simulate a Pebble ≥ 2.7 authorisation response that contains four
-        // challenges: three standard ones with tokens, and one `dns-persist-01`
-        // whose token field is absent (Pebble omits it via Go's omitempty).
         let raw = serde_json::json!({
             "status": "pending",
             "expires": "2099-01-01T00:00:00Z",
@@ -275,8 +271,6 @@ mod tests {
 
         let body = Bytes::from(serde_json::to_vec(&raw).unwrap());
 
-        // Before filtering, instant-acme cannot parse this because
-        // dns-persist-01 has no token field.
         assert!(
             serde_json::from_slice::<Authorization>(&body).is_err(),
             "should fail to parse before filtering"
@@ -284,14 +278,11 @@ mod tests {
 
         let filtered = filter_tokenless_challenges(body);
 
-        // After filtering the document must parse successfully.
         let authz: Authorization =
             serde_json::from_slice(&filtered).expect("should parse after filtering");
 
         assert_eq!(authz.status, AuthorizationStatus::Pending);
         assert_eq!(authz.identifier, Identifier::Dns("example.test".into()));
-        // dns-persist-01 must have been removed; the three token-bearing
-        // challenges must survive.
         assert_eq!(authz.challenges.len(), 3);
         assert!(authz
             .challenges
@@ -300,7 +291,6 @@ mod tests {
         assert!(authz.challenges.iter().all(|c| !c.token.is_empty()));
     }
 
-    /// Non-authz responses (no `challenges` key) must pass through unchanged.
     #[test]
     fn filter_leaves_non_authz_bodies_unchanged() {
         let original = br#"{"status":"valid","newNonce":"https://example.com/nonce"}"#;

@@ -126,10 +126,6 @@ pub(crate) fn inspect_state(
     }
 }
 
-// ---------------------------------------------------------------------------
-// Issuer abstraction
-// ---------------------------------------------------------------------------
-
 /// Trait for the component that performs ACME certificate issuance.
 ///
 /// The real implementation calls `account::load_or_create_account` followed
@@ -162,10 +158,6 @@ impl Issuer for RealIssuer {
         })
     }
 }
-
-// ---------------------------------------------------------------------------
-// State machine
-// ---------------------------------------------------------------------------
 
 /// Extract the ACME problem type URN from an error, if available.
 ///
@@ -292,7 +284,6 @@ impl AcmeStateMachine {
                 .unwrap_or(0),
         );
 
-        // ── Rate-limit backoff guard ─────────────────────────────────────
         if self.backoff.is_blocked(now_unix) {
             let next_retry_at = self.backoff.next_retry_at.unwrap_or(0);
             debug!(
@@ -305,10 +296,8 @@ impl AcmeStateMachine {
             return Ok(());
         }
 
-        // ── Renewal window check ─────────────────────────────────────────
         let cached = self.load_cached_bundle().await?;
         if let Some((bundle, not_after)) = cached {
-            // Keep the most recently observed cert expiry in memory for heartbeat logs.
             self.last_not_after_unix = Some(not_after);
             if let Ok(not_after_unix) = u64::try_from(not_after) {
                 metrics::set_cert_not_after(domain, not_after_unix);
@@ -327,7 +316,6 @@ impl AcmeStateMachine {
             }
         }
 
-        // ── Certificate issuance ─────────────────────────────────────────
         let issuance_started = Instant::now();
         let timeout = Duration::from_secs(self.config.issuance_timeout_seconds);
         match tokio::time::timeout(timeout, self.issuer.issue(&self.config)).await {
@@ -368,7 +356,6 @@ impl AcmeStateMachine {
                 }
                 self.last_renewal_at_unix = u64::try_from(now_unix).ok();
 
-                // Successful issuance clears any rate-limit back-off.
                 self.backoff.clear();
                 persist_backoff(&self.config.state_dir, &self.backoff).await?;
                 metrics::record_issuance_success(domain, elapsed);
@@ -436,8 +423,6 @@ impl AcmeStateMachine {
                 if emit_heartbeat {
                     self.emit_heartbeat(now_unix, false);
                 }
-                // All error classes propagate the error; the caller retries on
-                // the next ordinary tick interval.
                 Err(e)
             }
             Err(_) => {
@@ -546,7 +531,6 @@ impl AcmeStateMachine {
         let key_pem = tokio::fs::read(&key_path).await?;
         let bundle = CertBundle { cert_pem, key_pem };
 
-        // Validate SANs and key↔cert consistency via the shared helper.
         if let Err(e) = validate_bundle(&self.config, &bundle) {
             let reason = match &e {
                 AcmeError::OrderFailed(msg) => msg.as_str(),
@@ -603,10 +587,6 @@ impl AcmeStateMachine {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Backoff persistence helpers
-// ---------------------------------------------------------------------------
-
 async fn load_backoff(state_dir: &Path) -> BackoffState {
     let path = state_dir.join(BACKOFF_FILE);
     match tokio::fs::read(&path).await {
@@ -655,10 +635,6 @@ async fn persist_backoff(state_dir: &Path, state: &BackoffState) -> Result<(), A
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Bundle validation
-// ---------------------------------------------------------------------------
-
 /// Returns `Ok(())` if `bundle.cert_pem` covers every domain in
 /// `config.domains` and `bundle.key_pem` is mathematically paired with the
 /// cert's public key (SPKI).
@@ -667,9 +643,6 @@ async fn persist_backoff(state_dir: &Path, state: &BackoffState) -> Result<(), A
 /// fails; the reason names the specific check so operators can distinguish a
 /// CA-side problem from a config-side one.
 fn validate_bundle(config: &AcmeConfig, bundle: &CertBundle) -> Result<(), AcmeError> {
-    // Parse the certificate once and extract SPKI DER for the key-consistency
-    // check below.  Both checks share a single parse.  The parsed cert borrows
-    // from the PEM document, so everything is scoped together.
     let cert_spki_der: Vec<u8> = {
         let (_, pem_doc) = x509_parser::pem::parse_x509_pem(&bundle.cert_pem)
             .map_err(|e| AcmeError::OrderFailed(format!("cert.pem PEM parse failed: {e}")))?;
@@ -677,7 +650,6 @@ fn validate_bundle(config: &AcmeConfig, bundle: &CertBundle) -> Result<(), AcmeE
             .parse_x509()
             .map_err(|e| AcmeError::OrderFailed(format!("cert.pem X.509 parse failed: {e}")))?;
 
-        // ── SAN coverage ─────────────────────────────────────────────────────
         let cert_dns_names: std::collections::HashSet<String> = cert
             .subject_alternative_name()
             .ok()
@@ -717,11 +689,9 @@ fn validate_bundle(config: &AcmeConfig, bundle: &CertBundle) -> Result<(), AcmeE
             )));
         }
 
-        // ── SPKI extraction (used for key-consistency check below) ────────────
         cert.subject_pki.raw.to_vec()
     };
 
-    // ── Key↔cert consistency ──────────────────────────────────────────────────
     let key_str = std::str::from_utf8(&bundle.key_pem)
         .map_err(|_| AcmeError::OrderFailed("key.pem is not valid UTF-8".into()))?;
     let key_pair = rcgen::KeyPair::from_pem(key_str)
@@ -734,10 +704,6 @@ fn validate_bundle(config: &AcmeConfig, bundle: &CertBundle) -> Result<(), AcmeE
 
     Ok(())
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -752,8 +718,6 @@ mod tests {
     use crate::cert_sink::{CertBundle, CertSink};
     use crate::config::{AcmeConfig, CertSinkConfig, Layout};
     use crate::errors::SinkError;
-
-    // ── Helpers ─────────────────────────────────────────────────────────────
 
     fn test_config(state_dir: &std::path::Path) -> AcmeConfig {
         AcmeConfig {
@@ -909,8 +873,6 @@ mod tests {
         }
     }
 
-    // ── MockCertSink ─────────────────────────────────────────────────────────
-
     struct MockCertSink {
         calls: Mutex<Vec<String>>,
     }
@@ -939,8 +901,6 @@ mod tests {
             self.calls.lock().unwrap().clone()
         }
     }
-
-    // ── MockIssuer ──────────────────────────────────────────────────────────
 
     struct MockIssuer {
         results: Mutex<Vec<Result<CertBundle, AcmeError>>>,
@@ -985,15 +945,10 @@ mod tests {
         AcmeError::Protocol(instant_acme::Error::Api(problem))
     }
 
-    // ────────────────────────────────────────────────────────────────────────
-    // Test 1 — cert outside renewal window: tick → no issuer call, one sink
-    //           call (re-publish of cached cert)
-    // ────────────────────────────────────────────────────────────────────────
     #[tokio::test]
     async fn cert_outside_renewal_window_no_issuance() {
         let tmp = tempfile::tempdir().unwrap();
         let now_unix = 1_000_000i64;
-        // Cert expires 90 days from now; 30-day window → not in window yet.
         let not_after = now_unix + 90 * 86_400;
         let (cert_pem, key_pem) = generate_cert(not_after, &["a.example.test"]);
         std::fs::write(tmp.path().join("cert.pem"), &cert_pem).unwrap();
@@ -1010,7 +965,6 @@ mod tests {
             }
         }
 
-        // MockIssuer with empty results — must not be called.
         let issuer = Box::new(MockIssuer::with_results(vec![]));
         let mut sm = AcmeStateMachine::new_with_issuer(
             test_config(tmp.path()),
@@ -1019,19 +973,13 @@ mod tests {
         );
         sm.tick_at(now_unix).await.unwrap();
 
-        // One "cached" publish, no issuer call.
         assert_eq!(sink_clone.call_count(), 1);
     }
 
-    // ────────────────────────────────────────────────────────────────────────
-    // Test 2 — cert inside renewal window: tick → exactly one sink call
-    //           via the mock issuer
-    // ────────────────────────────────────────────────────────────────────────
     #[tokio::test]
     async fn cert_inside_renewal_window_triggers_issuance() {
         let tmp = tempfile::tempdir().unwrap();
         let now_unix = 1_000_000i64;
-        // Cert expires 10 days from now; 30-day window → inside window.
         let not_after = now_unix + 10 * 86_400;
         let (cert_pem, key_pem) = generate_cert(not_after, &["a.example.test"]);
         std::fs::write(tmp.path().join("cert.pem"), &cert_pem).unwrap();
@@ -1105,10 +1053,6 @@ mod tests {
         )));
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // Test 3 — rate-limited error: backoff persisted; next tick is a no-op;
-    //           tick after backoff window retries
-    // ────────────────────────────────────────────────────────────────────────
     #[tokio::test]
     async fn rate_limited_sets_backoff_and_blocks_retry() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1139,7 +1083,6 @@ mod tests {
             issuer,
         );
 
-        // Tick 1 → rate-limit → error, backoff.json written.
         assert!(sm.tick_at(now_unix).await.is_err());
         assert_eq!(sink_clone.call_count(), 0, "no publish on rate-limit");
 
@@ -1150,11 +1093,9 @@ mod tests {
         let next_retry_at = state.next_retry_at.unwrap();
         assert!(next_retry_at > now_unix);
 
-        // Tick 2 — still within backoff → no-op.
         sm.tick_at(next_retry_at - 1).await.unwrap();
         assert_eq!(sink_clone.call_count(), 0, "still blocked during backoff");
 
-        // Tick 3 — after backoff → issuance succeeds.
         sm.tick_at(next_retry_at + 1).await.unwrap();
         assert_eq!(sink_clone.call_count(), 1, "cert published after backoff");
     }
@@ -1209,9 +1150,6 @@ mod tests {
         );
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // Test 4 — backoff escalates: second delay is roughly 2× the first
-    // ────────────────────────────────────────────────────────────────────────
     #[tokio::test]
     async fn backoff_escalates_on_consecutive_failures() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1240,8 +1178,6 @@ mod tests {
         let second_retry = sm.backoff.next_retry_at.unwrap();
         let second_delay = second_retry - t2;
 
-        // With ±20 % jitter, second delay should be ~2× first.
-        // Accept [1.2×, 3.0×] to cover full jitter range.
         assert!(
             second_delay >= first_delay * 12 / 10,
             "second_delay={second_delay} should be ≥ 1.2× first_delay={first_delay}"
@@ -1252,9 +1188,6 @@ mod tests {
         );
     }
 
-    // ────────────────────────────────────────────────────────────────────────
-    // Test 5 — backoff cap: many consecutive failures → delay ≤ 24 h + 20 %
-    // ────────────────────────────────────────────────────────────────────────
     #[test]
     fn backoff_cap_never_exceeds_24h_plus_jitter() {
         const MAX_DELAY: i64 = 24 * 60 * 60;
@@ -1271,9 +1204,6 @@ mod tests {
         }
     }
 
-    // ────────────────────────────────────────────────────────────────────────
-    // Test 6 — success clears backoff
-    // ────────────────────────────────────────────────────────────────────────
     #[tokio::test]
     async fn success_clears_backoff() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1390,11 +1320,6 @@ mod tests {
         assert!(loaded.is_none());
     }
 
-    // ────────────────────────────────────────────────────────────────────────
-    // SAN-coverage and key-consistency tests
-    // ────────────────────────────────────────────────────────────────────────
-
-    // Helper: returns a DevNull sink wrapped in a Box.
     fn dev_null_sink() -> Box<dyn crate::cert_sink::CertSink> {
         struct DevNull;
         impl CertSink for DevNull {
@@ -1411,7 +1336,6 @@ mod tests {
     async fn load_cached_bundle_ok_when_cert_sans_are_superset_of_configured() {
         let tmp = tempfile::tempdir().unwrap();
         let now_unix = time::OffsetDateTime::now_utc().unix_timestamp();
-        // Cert covers two names; test_config only requests "a.example.test".
         let (cert_pem, key_pem) = generate_cert(
             now_unix + 90 * 86_400,
             &["a.example.test", "b.example.test"],
@@ -1439,7 +1363,6 @@ mod tests {
         let mut cfg = test_config(tmp.path());
         cfg.domains = vec!["a.example.test".into(), "b.example.test".into()];
 
-        // Cert covers exactly the two configured domains.
         let (cert_pem, key_pem) = generate_cert(
             now_unix + 90 * 86_400,
             &["a.example.test", "b.example.test"],
@@ -1467,18 +1390,15 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let now_unix = time::OffsetDateTime::now_utc().unix_timestamp();
 
-        // Build a config that requires two domains.
         let mut cfg = test_config(tmp.path());
         cfg.domains = vec!["a.example.test".into(), "b.example.test".into()];
 
-        // But the cert only covers one of them.
         let (cert_pem, key_pem) = generate_cert(now_unix + 90 * 86_400, &["a.example.test"]);
         let bundle = CertBundle {
             cert_pem: cert_pem.clone(),
             key_pem,
         };
 
-        // Write cert and key files manually with a sentinel matching the cert hash.
         std::fs::write(tmp.path().join(CERT_FILE), &cert_pem).unwrap();
         std::fs::write(tmp.path().join(KEY_FILE), bundle.key_pem.clone()).unwrap();
         std::fs::write(tmp.path().join(SENTINEL_FILE), sha256_hex(&cert_pem)).unwrap();
@@ -1533,9 +1453,6 @@ mod tests {
         );
     }
 
-    // ────────────────────────────────────────────────────────────────────────
-    // Test 7 — jitter offset is deterministic
-    // ────────────────────────────────────────────────────────────────────────
     #[test]
     fn jitter_offset_is_stable() {
         let not_after = 1_000_000 + 90 * 86_400;
@@ -1545,14 +1462,9 @@ mod tests {
         assert_eq!(r1, r2);
     }
 
-    // ────────────────────────────────────────────────────────────────────────
-    // Test 8 — jitter offset spreads: 100 distinct domains span > half window
-    // ────────────────────────────────────────────────────────────────────────
     #[test]
     fn jitter_offset_spreads_across_window() {
         let window_secs = 30u64 * 86_400;
-        // The offset for a domain is: fnv1a(domain) % window_secs.
-        // Replicate the formula from renewal.rs here.
         fn offset(domain: &str, window: u64) -> u64 {
             const O: u64 = 14_695_981_039_346_656_037;
             const P: u64 = 1_099_511_628_211;
@@ -1627,7 +1539,6 @@ mod tests {
 
         let err = sm.tick_at(1_000_000).await.unwrap_err();
 
-        // Validation catches the bad bundle before persist/publish.
         assert!(
             matches!(err, AcmeError::OrderFailed(ref msg) if msg.contains("cert.pem")),
             "expected OrderFailed about cert parse, got: {err:?}"
@@ -1636,7 +1547,6 @@ mod tests {
             logs_contain("issued bundle failed validation"),
             "error log must mention validation failure"
         );
-        // Nothing persisted.
         assert!(
             !tmp.path().join(CERT_FILE).exists(),
             "cert.pem must not be written for an invalid bundle"
@@ -1652,7 +1562,6 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let now_unix = 1_000_000i64;
 
-        // Config requires two domains; cert only covers one.
         let mut cfg = test_config(tmp.path());
         cfg.domains = vec!["a.example.test".into(), "b.example.test".into()];
 
@@ -1685,7 +1594,6 @@ mod tests {
             logs_contain("issued bundle failed validation"),
             "error log must mention validation failure"
         );
-        // Nothing persisted.
         assert!(
             !tmp.path().join(CERT_FILE).exists(),
             "cert.pem must not be written for a bundle with missing SANs"
@@ -1694,7 +1602,6 @@ mod tests {
             !tmp.path().join(SENTINEL_FILE).exists(),
             "sentinel must not be written for a bundle with missing SANs"
         );
-        // Sink not called.
         assert_eq!(
             sink.call_count(),
             0,
@@ -1744,7 +1651,6 @@ mod tests {
             logs_contain("issued bundle failed validation"),
             "error log must mention validation failure"
         );
-        // Nothing persisted.
         assert!(
             !tmp.path().join(CERT_FILE).exists(),
             "cert.pem must not be written for a bundle with a mismatched key"
@@ -1753,7 +1659,6 @@ mod tests {
             !tmp.path().join(SENTINEL_FILE).exists(),
             "sentinel must not be written for a bundle with a mismatched key"
         );
-        // Sink not called.
         assert_eq!(
             sink.call_count(),
             0,
@@ -1920,7 +1825,6 @@ mod tests {
         let mut sm =
             AcmeStateMachine::new_with_issuer(test_config(tmp.path()), Box::new(DevNull), issuer);
 
-        // Tick 1: recovery_required → gauge = 1.
         assert!(sm.tick_at(now_unix).await.is_err());
         let metrics: HashSet<_> = crate::metrics::take_test_updates().into_iter().collect();
         assert!(
@@ -1928,7 +1832,6 @@ mod tests {
             "expected account_state=1 after first (recovery_required) tick but got: {metrics:?}"
         );
 
-        // Tick 2: success → gauge drops back to 0.
         sm.tick_at(now_unix + 1).await.unwrap();
         let metrics: HashSet<_> = crate::metrics::take_test_updates().into_iter().collect();
         assert!(
@@ -1962,9 +1865,7 @@ mod tests {
         let mut sm =
             AcmeStateMachine::new_with_issuer(test_config(tmp.path()), Box::new(DevNull), issuer);
 
-        // First tick: should log.
         assert!(sm.tick_at(1_000_000).await.is_err());
-        // Second tick immediately after: should NOT log again (< 60 s elapsed).
         assert!(sm.tick_at(1_000_001).await.is_err());
 
         logs_assert(|lines: &[&str]| {
@@ -1989,14 +1890,11 @@ mod tests {
 
         let state = load_backoff(tmp.path()).await;
 
-        // Falls back to default.
         assert_eq!(state, BackoffState::default());
-        // Original file is gone (renamed to quarantine file).
         assert!(
             !tmp.path().join(BACKOFF_FILE).exists(),
             "backoff.json should have been renamed away"
         );
-        // A quarantine file matching the pattern was created.
         let corrupt_files: Vec<_> = std::fs::read_dir(tmp.path())
             .unwrap()
             .filter_map(|e| e.ok())
@@ -2011,7 +1909,6 @@ mod tests {
             1,
             "expected exactly one quarantine file"
         );
-        // Error was logged.
         assert!(
             logs_contain("backoff.json is corrupt"),
             "expected an error log about corrupt backoff.json"
@@ -2021,7 +1918,6 @@ mod tests {
     #[tokio::test]
     async fn missing_backoff_json_defaults_silently() {
         let tmp = tempfile::tempdir().unwrap();
-        // No backoff.json written — first-run case.
 
         let state = load_backoff(tmp.path()).await;
 
@@ -2038,9 +1934,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let tmp = tempfile::tempdir().unwrap();
-        // Write corrupt JSON so the parse step fails.
         std::fs::write(tmp.path().join(BACKOFF_FILE), b"{not-json").unwrap();
-        // Make the parent directory read-only so the rename fails.
         let dir_perms = std::fs::Permissions::from_mode(0o555);
         std::fs::set_permissions(tmp.path(), dir_perms).unwrap();
 
@@ -2067,7 +1961,6 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let tmp = tempfile::tempdir().unwrap();
-        // Write valid JSON, then make the file unreadable.
         let valid = serde_json::to_vec(&BackoffState::default()).unwrap();
         std::fs::write(tmp.path().join(BACKOFF_FILE), &valid).unwrap();
         let no_perms = std::fs::Permissions::from_mode(0o000);
@@ -2161,16 +2054,12 @@ mod tests {
         assert!(logs_contain("envoy-acme heartbeat"));
     }
 
-    // ────────────────────────────────────────────────────────────────────────
-    // Heartbeat tests
-    //
     // NOTE: `#[traced_test]` MUST be the outer attribute and `#[tokio::test]`
     // the inner one. `traced_test` installs its thread-local subscriber by
     // wrapping the test fn; if `tokio::test` is outer, the runtime is built
     // first and `info!` calls from inside the async body run on a worker
     // thread where the subscriber is not in scope, so `logs_contain` and
     // `logs_assert` will return nothing and the tests will fail spuriously.
-    // ────────────────────────────────────────────────────────────────────────
     #[traced_test]
     #[tokio::test]
     async fn heartbeat_fires_on_threshold() {
@@ -2357,8 +2246,6 @@ mod tests {
         )));
     }
 
-    // ── Issuance timeout ────────────────────────────────────────────────────
-
     /// A `MockIssuer` whose `issue` future never resolves.
     struct HangingIssuer;
 
@@ -2376,7 +2263,6 @@ mod tests {
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn issuance_timeout_returns_timeout_error() {
-        // Hold the metrics lock so metric updates stay isolated.
         let _guard = crate::metrics::test_lock();
         crate::metrics::reset_test_state();
 
@@ -2390,7 +2276,6 @@ mod tests {
         }
 
         let mut cfg = test_config(tmp.path());
-        // Use a very short timeout so the test finishes quickly.
         cfg.issuance_timeout_seconds = 5;
 
         let mut sm =
@@ -2427,24 +2312,15 @@ mod tests {
 
         let _ = sm.tick_at(1_000_000).await;
 
-        // Backoff must not have escalated.
         assert_eq!(sm.backoff, BackoffState::default());
         assert!(!tmp.path().join(BACKOFF_FILE).exists());
 
-        // A failure counter increment must have been recorded.
         let metrics: HashSet<_> = crate::metrics::take_test_updates().into_iter().collect();
         assert!(
             metrics.contains("envoy_acme_issuance_total:failure"),
             "expected failure metric; got {metrics:?}"
         );
     }
-
-    // ────────────────────────────────────────────────────────────────────────
-    // emit_heartbeat: checked_add overflow path
-    //
-    // When `now_unix` is close to `i64::MAX`, adding `tick_seconds` overflows
-    // `i64::checked_add`, so `next_attempt_at_unix` is `None` in the log.
-    // ────────────────────────────────────────────────────────────────────────
 
     #[traced_test]
     #[tokio::test]
@@ -2458,32 +2334,20 @@ mod tests {
             }
         }
 
-        // Immediate error issuer so the tick completes quickly.
         let issuer = Box::new(MockIssuer::with_results(vec![Err(AcmeError::OrderFailed(
             "mock".into(),
         ))]));
         let mut sm =
             AcmeStateMachine::new_with_issuer(test_config(tmp.path()), Box::new(DevNull), issuer);
-        // Force heartbeat on every tick.
         sm.heartbeat_every_ticks = 1;
 
-        // i64::MAX - 1 + tick_seconds (60) overflows i64::checked_add → None.
         let _ = sm.tick_at(i64::MAX - 1).await;
 
-        // The heartbeat log must show next_attempt_at_unix=None (overflow path).
         assert!(
             logs_contain("next_attempt_at_unix=None"),
             "heartbeat must log None when checked_add overflows"
         );
     }
-
-    // ────────────────────────────────────────────────────────────────────────
-    // load_cached_bundle: sentinel I/O error (non-NotFound)
-    //
-    // When the sentinel path exists but is not readable (e.g. it is a directory
-    // rather than a regular file), tokio::fs::read returns an Err whose kind is
-    // not NotFound, so load_cached_bundle must propagate it as Err(AcmeError).
-    // ────────────────────────────────────────────────────────────────────────
 
     #[cfg(unix)]
     #[tokio::test]
@@ -2517,10 +2381,6 @@ mod tests {
         );
     }
 
-    // ────────────────────────────────────────────────────────────────────────
-    // load_cached_bundle / validate_bundle: key.pem not valid UTF-8
-    // ────────────────────────────────────────────────────────────────────────
-
     #[traced_test]
     #[tokio::test]
     async fn load_cached_bundle_none_when_key_not_utf8() {
@@ -2530,7 +2390,6 @@ mod tests {
 
         std::fs::write(tmp.path().join(CERT_FILE), &cert_pem).unwrap();
         std::fs::write(tmp.path().join(SENTINEL_FILE), sha256_hex(&cert_pem)).unwrap();
-        // Write a key that is not valid UTF-8.
         std::fs::write(tmp.path().join(KEY_FILE), b"\xff\xff\xff").unwrap();
 
         let sm = AcmeStateMachine::new_with_issuer(
@@ -2549,10 +2408,6 @@ mod tests {
             "warn log must mention the UTF-8 error"
         );
     }
-
-    // ────────────────────────────────────────────────────────────────────────
-    // load_cached_bundle / validate_bundle: key.pem parse failed
-    // ────────────────────────────────────────────────────────────────────────
 
     #[traced_test]
     #[tokio::test]
