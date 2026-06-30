@@ -174,6 +174,26 @@ fn acme_problem_type(e: &AcmeError) -> Option<&str> {
     }
 }
 
+/// Returns `true` if a rate-limited log message should be emitted now, and
+/// updates `last_log` to the current instant when it does.
+///
+/// Emits on the first call (`last_log == None`) and then at most once per
+/// `interval`.  This mirrors the pattern used by `handle_runtime_tick_result`
+/// for the "engine is dead" message.
+fn should_emit_rate_limited_log(
+    last_log: &mut Option<Instant>,
+    interval: std::time::Duration,
+) -> bool {
+    let now = Instant::now();
+    let emit = last_log
+        .map(|t| now.duration_since(t) >= interval)
+        .unwrap_or(true);
+    if emit {
+        *last_log = Some(now);
+    }
+    emit
+}
+
 pub struct AcmeStateMachine {
     config: AcmeConfig,
     sink: Box<dyn CertSink>,
@@ -362,14 +382,10 @@ impl AcmeStateMachine {
                     }
                     backoff::ErrorClass::RecoveryRequired => {
                         metrics::record_issuance_recovery_required(domain, elapsed);
-                        let now_instant = Instant::now();
-                        let should_log = self
-                            .last_recovery_required_log
-                            .map(|t| {
-                                now_instant.duration_since(t) >= RECOVERY_REQUIRED_LOG_INTERVAL
-                            })
-                            .unwrap_or(true);
-                        if should_log {
+                        if should_emit_rate_limited_log(
+                            &mut self.last_recovery_required_log,
+                            RECOVERY_REQUIRED_LOG_INTERVAL,
+                        ) {
                             error!(
                                 domain,
                                 problem_type, %e,
@@ -377,7 +393,6 @@ impl AcmeStateMachine {
                                  (e.g. delete account.json and re-register, or check domain \
                                  authorisation); this message is rate-limited to once per 60 s"
                             );
-                            self.last_recovery_required_log = Some(now_instant);
                         }
                     }
                     backoff::ErrorClass::Transient => {
@@ -1539,6 +1554,10 @@ mod tests {
     }
 
     #[allow(clippy::await_holding_lock)]
+    // The metrics test lock is a std::sync::MutexGuard, which is !Send.  It is
+    // intentionally held across the async tick to serialise metric updates
+    // across tests.  All our tests use #[tokio::test] which runs on a
+    // current-thread scheduler, so the guard never crosses a thread boundary.
     #[tokio::test]
     async fn permanent_error_emits_permanent_metric_label() {
         let _guard = crate::metrics::test_lock();
@@ -1571,6 +1590,8 @@ mod tests {
     }
 
     #[allow(clippy::await_holding_lock)]
+    // See permanent_error_emits_permanent_metric_label for why the suppression
+    // is safe here.
     #[tokio::test]
     async fn recovery_required_error_emits_recovery_required_metric_label() {
         let _guard = crate::metrics::test_lock();
@@ -1605,6 +1626,8 @@ mod tests {
     }
 
     #[allow(clippy::await_holding_lock)]
+    // See permanent_error_emits_permanent_metric_label for why the suppression
+    // is safe here.
     #[traced_test]
     #[tokio::test]
     async fn recovery_required_log_is_rate_limited_to_once_per_60s() {
