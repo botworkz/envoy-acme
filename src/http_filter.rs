@@ -427,4 +427,81 @@ mod tests {
             None
         );
     }
+
+    // ── AcmeHttpFilterConfig::from_bytes ──────────────────────────────────────
+
+    #[test]
+    fn from_bytes_json_parses_domains() {
+        let json = br#"{"domains": ["Example.COM", "other.test"]}"#;
+        let cfg = AcmeHttpFilterConfig::from_bytes(json);
+        // domains are lower-cased at construction
+        assert!(cfg.domains.contains("example.com"));
+        assert!(cfg.domains.contains("other.test"));
+    }
+
+    #[test]
+    fn from_bytes_yaml_parses_domains() {
+        let yaml = b"domains:\n  - Example.COM\n  - other.test\n";
+        let cfg = AcmeHttpFilterConfig::from_bytes(yaml);
+        assert!(cfg.domains.contains("example.com"));
+        assert!(cfg.domains.contains("other.test"));
+    }
+
+    #[test]
+    fn from_bytes_empty_input_yields_empty_domain_set() {
+        let cfg = AcmeHttpFilterConfig::from_bytes(b"");
+        assert!(cfg.domains.is_empty());
+    }
+
+    #[test]
+    fn from_bytes_invalid_input_yields_empty_domain_set() {
+        let cfg = AcmeHttpFilterConfig::from_bytes(b"}{not valid json or yaml at all}{");
+        assert!(cfg.domains.is_empty());
+    }
+
+    // ── on_request_headers: authority-related branches ────────────────────────
+
+    #[test]
+    fn continue_when_authority_header_missing() {
+        let mut filter = make_filter(&["example.test"]);
+        let mut envoy = MockEnvoyHttpFilter::new();
+
+        envoy
+            .expect_get_request_header_value()
+            .with(eq(":path"))
+            .returning(|_| Some(EnvoyBuffer::new(b"/.well-known/acme-challenge/valid-token")));
+
+        envoy
+            .expect_get_request_header_value()
+            .with(eq(":authority"))
+            .returning(|_| None);
+
+        let status = filter.on_request_headers(&mut envoy, true);
+        assert_eq!(
+            status,
+            abi::envoy_dynamic_module_type_on_http_filter_request_headers_status::Continue
+        );
+    }
+
+    #[test]
+    fn continue_when_host_not_in_domains() {
+        let mut filter = make_filter(&["allowed.test"]);
+        let mut envoy = MockEnvoyHttpFilter::new();
+
+        envoy
+            .expect_get_request_header_value()
+            .with(eq(":path"))
+            .returning(|_| Some(EnvoyBuffer::new(b"/.well-known/acme-challenge/valid-token")));
+
+        envoy
+            .expect_get_request_header_value()
+            .with(eq(":authority"))
+            .returning(|_| Some(EnvoyBuffer::new(b"not-allowed.test")));
+
+        let status = filter.on_request_headers(&mut envoy, true);
+        assert_eq!(
+            status,
+            abi::envoy_dynamic_module_type_on_http_filter_request_headers_status::Continue
+        );
+    }
 }
