@@ -103,15 +103,46 @@ mod tests {
             .with(eq(":path"))
             .returning(|_| Some(EnvoyBuffer::new(b"/.well-known/acme-challenge/token-1")));
 
-        envoy.expect_send_response().returning(|_, _, _, _| {});
+        envoy
+            .expect_send_response()
+            .withf(|status, headers, body, details| {
+                *status == 200
+                    && headers.len() == 1
+                    && headers[0].0 == "content-type"
+                    && headers[0].1 == CONTENT_TYPE
+                    && *body == Some(b"key-auth-1".as_slice())
+                    && *details == Some("acme_challenge_hit")
+            })
+            .times(1)
+            .returning(|_, _, _, _| {});
 
-        let status = filter.on_request_headers(&mut envoy, true);
+        // `end_of_stream` is ignored by the implementation; passing `false`
+        // here confirms the challenge-hit path is unchanged.
+        let status = filter.on_request_headers(&mut envoy, false);
         assert_eq!(
             status,
             abi::envoy_dynamic_module_type_on_http_filter_request_headers_status::StopIteration
         );
 
         challenge_store::remove("token-1");
+    }
+
+    #[test]
+    fn config_factory_creates_filter() {
+        let config = AcmeHttpFilterConfig;
+        let mut envoy = MockEnvoyHttpFilter::new();
+        let mut filter = config.new_http_filter(&mut envoy);
+
+        envoy
+            .expect_get_request_header_value()
+            .with(eq(":path"))
+            .returning(|_| None);
+
+        let status = filter.on_request_headers(&mut envoy, true);
+        assert_eq!(
+            status,
+            abi::envoy_dynamic_module_type_on_http_filter_request_headers_status::Continue
+        );
     }
 
     #[test]
