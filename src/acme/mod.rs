@@ -158,6 +158,7 @@ impl Issuer for RealIssuer {
             )
             .await?;
             let account_client = client::RealAcmeAccount(&account);
+            // SDK-blocked: only reachable via the Pebble integration-test job.
             order::issue_certificate(config, &account_client).await
         })
     }
@@ -340,6 +341,7 @@ impl AcmeStateMachine {
                 if let Err(e) = validate_bundle(&self.config, &bundle) {
                     let reason = match &e {
                         AcmeError::OrderFailed(msg) => msg.as_str(),
+                        // Safety net: validate_bundle only returns OrderFailed.
                         _ => "bundle validation failed",
                     };
                     metrics::record_issuance_failure(domain, elapsed);
@@ -364,6 +366,7 @@ impl AcmeStateMachine {
                             metrics::set_cert_not_after(domain, not_after_unix);
                         }
                     }
+                    // Defensive: cert just passed validate_bundle so this parse should not fail.
                     Err(e) => error!(%e, "unable to parse not_after from issued certificate"),
                 }
                 self.last_renewal_at_unix = u64::try_from(now_unix).ok();
@@ -550,6 +553,7 @@ impl AcmeStateMachine {
         if let Err(e) = validate_bundle(&self.config, &bundle) {
             let reason = match &e {
                 AcmeError::OrderFailed(msg) => msg.as_str(),
+                // Safety net: validate_bundle only returns OrderFailed.
                 _ => "bundle validation failed",
             };
             warn!(domain = %domain, reason = %reason, "cached bundle invalid; will re-issue");
@@ -2580,6 +2584,125 @@ mod tests {
         assert!(
             logs_contain("key.pem parse failed"),
             "warn log must mention the parse failure"
+        );
+    }
+
+    #[test]
+    fn inspect_state_returns_invalid_when_not_after_is_pre_unix_epoch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (cert_pem, key_pem) = generate_cert(-1, &["a.example.test"]);
+        std::fs::write(tmp.path().join("cert.pem"), &cert_pem).unwrap();
+        std::fs::write(tmp.path().join("key.pem"), &key_pem).unwrap();
+
+        let summary = inspect_state(tmp.path(), "example.test", 10);
+        match summary {
+            StateSummary::CertCachedButInvalid { reason } => {
+                assert!(
+                    reason.contains("invalid not_after timestamp"),
+                    "reason should mention invalid not_after timestamp, got: {reason}"
+                );
+            }
+            other => panic!("expected CertCachedButInvalid, got {other:?}"),
+        }
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn validation_failure_emits_heartbeat_when_due() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        struct DevNull;
+        impl CertSink for DevNull {
+            fn publish(&self, _: &str, _: &CertBundle) -> Result<(), SinkError> {
+                Ok(())
+            }
+        }
+
+        let issuer = Box::new(MockIssuer::with_results(vec![Ok(CertBundle {
+            cert_pem: b"not a cert".to_vec(),
+            key_pem: b"not a key".to_vec(),
+        })]));
+        let mut sm =
+            AcmeStateMachine::new_with_issuer(test_config(tmp.path()), Box::new(DevNull), issuer);
+        sm.heartbeat_every_ticks = 1;
+
+        let _ = sm.tick_at(1_000_000).await;
+
+        assert!(
+            logs_contain("envoy-acme heartbeat"),
+            "validation failure must emit a heartbeat when heartbeat_every_ticks == 1"
+        );
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn issuance_timeout_emits_heartbeat_when_due() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        struct DevNull;
+        impl CertSink for DevNull {
+            fn publish(&self, _: &str, _: &CertBundle) -> Result<(), SinkError> {
+                Ok(())
+            }
+        }
+
+        let mut cfg = test_config(tmp.path());
+        cfg.issuance_timeout_seconds = 1;
+
+        let mut sm =
+            AcmeStateMachine::new_with_issuer(cfg, Box::new(DevNull), Box::new(HangingIssuer));
+        sm.heartbeat_every_ticks = 1;
+
+        let _ = sm.tick_at(1_000_000).await;
+
+        assert!(
+            logs_contain("envoy-acme heartbeat"),
+            "issuance timeout must emit a heartbeat when heartbeat_every_ticks == 1"
+        );
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn load_cached_bundle_none_when_cert_has_only_ip_sans() {
+        use std::net::{IpAddr, Ipv4Addr};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let now_unix = time::OffsetDateTime::now_utc().unix_timestamp();
+
+        let key = KeyPair::generate().unwrap();
+        let mut params = CertificateParams::default();
+        let not_after = time::OffsetDateTime::from_unix_timestamp(now_unix + 90 * 86_400).unwrap();
+        params.not_before = not_after - Duration::from_secs(90 * 86_400);
+        params.not_after = not_after;
+        params.subject_alt_names = vec![rcgen::SanType::IpAddress(IpAddr::V4(Ipv4Addr::LOCALHOST))];
+        let cert = params.self_signed(&key).unwrap();
+        let cert_pem = cert.pem().into_bytes();
+        let key_pem = key.serialize_pem().into_bytes();
+
+        tokio::fs::write(tmp.path().join(CERT_FILE), &cert_pem)
+            .await
+            .unwrap();
+        tokio::fs::write(tmp.path().join(KEY_FILE), &key_pem)
+            .await
+            .unwrap();
+        tokio::fs::write(tmp.path().join(SENTINEL_FILE), sha256_hex(&cert_pem))
+            .await
+            .unwrap();
+
+        let sm = AcmeStateMachine::new_with_issuer(
+            test_config(tmp.path()),
+            dev_null_sink(),
+            Box::new(MockIssuer::with_results(vec![])),
+        );
+
+        let loaded = sm.load_cached_bundle().await.unwrap();
+        assert!(
+            loaded.is_none(),
+            "cert with only IP SANs must be rejected (no DNS names match configured domain)"
+        );
+        assert!(
+            logs_contain("cached bundle invalid"),
+            "warn log must mention invalid cached bundle"
         );
     }
 }

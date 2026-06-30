@@ -156,6 +156,7 @@ impl TryFrom<RawAcmeConfig> for AcmeConfig {
             }
             "http" => {
                 let profile = match raw.directory_profile {
+                    // Unreachable: staging/production profiles always resolve to an https:// URI.
                     Some(DirectoryProfile::Staging) => "staging",
                     Some(DirectoryProfile::Production) => "production",
                     None => "unset (no directory_profile)",

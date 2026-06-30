@@ -101,6 +101,7 @@ impl<EHF: EnvoyHttpFilter> HttpFilter<EHF> for AcmeHttpFilter {
         };
         let host = normalize_host(authority.as_slice());
         if !self.domains.contains(&host) {
+            // tarpaulin: macro-internal lines not instrumented without a subscriber.
             tracing::debug!(
                 host = %host,
                 "acme: host not in configured domains, falling through"
@@ -109,6 +110,7 @@ impl<EHF: EnvoyHttpFilter> HttpFilter<EHF> for AcmeHttpFilter {
         }
 
         if let Some(key_authorization) = challenge_store::lookup(token) {
+            // tarpaulin: constant-expression argument lines not individually instrumented.
             envoy.send_response(
                 200,
                 &[("content-type", CONTENT_TYPE)],
@@ -118,6 +120,7 @@ impl<EHF: EnvoyHttpFilter> HttpFilter<EHF> for AcmeHttpFilter {
             return abi::envoy_dynamic_module_type_on_http_filter_request_headers_status::StopIteration;
         }
 
+        // tarpaulin: constant-expression argument lines not individually instrumented.
         envoy.send_response(
             404,
             &[("content-type", CONTENT_TYPE)],
@@ -528,6 +531,7 @@ mod tests {
         );
     }
 
+    #[traced_test]
     #[test]
     fn continue_when_host_not_in_domains() {
         let mut filter = make_filter(&["allowed.test"]);
