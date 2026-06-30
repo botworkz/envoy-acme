@@ -455,8 +455,6 @@ mod tests {
 
     struct MockAcmeOrder {
         authorizations_response: Option<Result<Vec<Authorization>, instant_acme::Error>>,
-        /// `key_authorization` returns this string.  Defaults to `"mock-key-auth"`.
-        key_authorization_value: String,
         /// `set_challenge_ready` returns this result (taken once) and then `Ok(())`.
         set_challenge_ready_result: Option<Result<(), instant_acme::Error>>,
         /// If non-zero, `set_challenge_ready` sleeps for this many milliseconds
@@ -466,6 +464,8 @@ mod tests {
         refresh_state: OrderState,
         finalize_response: Option<Result<(), instant_acme::Error>>,
         certificate_responses: VecDeque<Result<Option<String>, instant_acme::Error>>,
+        /// The string returned by `key_authorization`.  Tests that care override
+        /// via `.with_key_auth(...)`; tests that don't get the default.
         key_auth_stash: String,
     }
 
@@ -473,7 +473,6 @@ mod tests {
         fn with_statuses(statuses: Vec<OrderStatus>) -> Self {
             Self {
                 authorizations_response: Some(Ok(vec![make_authz("valid", "example.test", &[])])),
-                key_authorization_value: "mock-key-auth".to_string(),
                 set_challenge_ready_result: None,
                 set_challenge_ready_delay_ms: 0,
                 refresh_statuses: statuses.into(),
@@ -506,7 +505,6 @@ mod tests {
 
         fn key_authorization(&self, _challenge: &Challenge) -> String {
             self.key_auth_stash.clone()
-            self.key_authorization_value.clone()
         }
 
         async fn set_challenge_ready(&mut self, _url: &str) -> Result<(), instant_acme::Error> {
