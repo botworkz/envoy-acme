@@ -171,6 +171,35 @@ pub async fn load_or_create_account(
 mod tests {
     use super::*;
     use instant_acme::{Authorization, AuthorizationStatus, ChallengeType, Identifier};
+    use std::sync::{Arc, Mutex};
+
+    struct MockHttpClient {
+        seen_user_agent: Arc<Mutex<Option<header::HeaderValue>>>,
+        body: Bytes,
+    }
+
+    impl HttpClient for MockHttpClient {
+        fn request(
+            &self,
+            req: Request<Full<Bytes>>,
+        ) -> Pin<Box<dyn Future<Output = Result<BytesResponse, instant_acme::Error>> + Send>>
+        {
+            *self.seen_user_agent.lock().expect("mutex lock") =
+                req.headers().get(header::USER_AGENT).cloned();
+            let (parts, _) = hyper::Response::builder()
+                .status(200)
+                .body(())
+                .expect("response")
+                .into_parts();
+            let body = self.body.clone();
+            Box::pin(async move {
+                Ok(BytesResponse {
+                    parts,
+                    body: Box::new(body) as Box<dyn BytesBody>,
+                })
+            })
+        }
+    }
 
     fn install_ring() {
         // rustls 0.23 requires an explicit provider when running in a test context.
@@ -293,5 +322,105 @@ mod tests {
         let bytes = Bytes::from(serde_json::to_vec(&original).unwrap());
         let result = filter_tokenless_challenges(bytes.clone());
         assert_eq!(result, bytes);
+    }
+
+    #[test]
+    fn filter_leaves_invalid_json_body_unchanged() {
+        let original = b"<<<not json>>>";
+        let body = Bytes::from_static(original);
+        let result = filter_tokenless_challenges(body);
+        assert_eq!(result.as_ref(), original);
+    }
+
+    #[tokio::test]
+    async fn with_user_agent_sets_or_preserves_and_filters_response() {
+        let filtered_source = Bytes::from(
+            serde_json::json!({
+                "challenges": [
+                    {"type": "http-01", "token": "present"},
+                    {"type": "dns-persist-01"}
+                ]
+            })
+            .to_string(),
+        );
+        let seen = Arc::new(Mutex::new(None));
+        let client = WithUserAgent(Box::new(MockHttpClient {
+            seen_user_agent: Arc::clone(&seen),
+            body: filtered_source,
+        }));
+
+        let req = Request::builder()
+            .uri("https://example.invalid/acme")
+            .body(Full::new(Bytes::new()))
+            .expect("request");
+        let mut rsp = client.request(req).await.expect("request ok");
+        let body = rsp.body.into_bytes().await.expect("bytes");
+        let parsed: serde_json::Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(parsed["challenges"].as_array().expect("array").len(), 1);
+        assert_eq!(
+            seen.lock().expect("mutex lock").clone(),
+            Some(header::HeaderValue::from_static(concat!(
+                "envoy-acme/",
+                env!("CARGO_PKG_VERSION")
+            )))
+        );
+
+        let custom_ua = header::HeaderValue::from_static("custom-agent/1.0");
+        let seen_custom = Arc::new(Mutex::new(None));
+        let client_custom = WithUserAgent(Box::new(MockHttpClient {
+            seen_user_agent: Arc::clone(&seen_custom),
+            body: Bytes::from_static(b"{\"challenges\":[]}"),
+        }));
+        let req_custom = Request::builder()
+            .uri("https://example.invalid/acme")
+            .header(header::USER_AGENT, custom_ua.clone())
+            .body(Full::new(Bytes::new()))
+            .expect("request with ua");
+        let _ = client_custom
+            .request(req_custom)
+            .await
+            .expect("request with ua ok");
+        assert_eq!(
+            seen_custom.lock().expect("mutex lock").clone(),
+            Some(custom_ua)
+        );
+    }
+
+    #[test]
+    fn build_custom_client_missing_file_returns_io_error() {
+        install_ring();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let missing = tmp.path().join("missing.pem");
+        let result = build_custom_client(&missing);
+        assert!(matches!(result, Err(AcmeError::Io(_))));
+    }
+
+    #[test]
+    fn build_custom_client_invalid_pem_returns_io_error() {
+        install_ring();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let ca_path = tmp.path().join("junk.pem");
+        std::fs::write(
+            &ca_path,
+            b"-----BEGIN CERTIFICATE-----\n@@@\n-----END CERTIFICATE-----\n",
+        )
+        .expect("write");
+        let result = build_custom_client(&ca_path);
+        assert!(matches!(result, Err(AcmeError::Io(_))));
+    }
+
+    #[tokio::test]
+    async fn load_or_create_account_invalid_json_returns_json_error() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("account.json");
+        std::fs::write(&path, b"{not-json").expect("write");
+        let result = load_or_create_account(
+            "https://example.invalid/directory",
+            "mailto:test@example.com",
+            &path,
+            None,
+        )
+        .await;
+        assert!(matches!(result, Err(AcmeError::Json(_))));
     }
 }
