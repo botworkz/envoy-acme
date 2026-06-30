@@ -1,5 +1,6 @@
 pub mod account;
 pub mod backoff;
+pub(crate) mod client;
 pub mod order;
 pub mod renewal;
 
@@ -153,7 +154,8 @@ impl Issuer for RealIssuer {
                 config.directory_ca_file.as_deref(),
             )
             .await?;
-            order::issue_certificate(config, &account).await
+            let account_client = client::RealAcmeAccount(&account);
+            order::issue_certificate(config, &account_client).await
         })
     }
 }
