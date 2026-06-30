@@ -2,6 +2,14 @@
 // section "Coverage exclusions" for the policy. The functions below are
 // FFI entry points loaded by Envoy and cannot be invoked from a Rust
 // unit test.
+//! Envoy dynamic module that obtains and renews TLS certificates via the ACME
+//! protocol (RFC 8555), serving HTTP-01 challenges from the same Envoy process
+//! and publishing issued certificates to a cert sink (currently filesystem).
+//!
+//! The `AcmeStateMachine` drives the renewal loop; `AcmeBootstrapConfig` is the
+//! entry point that Envoy calls at startup.
+#![deny(unsafe_code)]
+#![deny(missing_docs)]
 #![allow(clippy::incompatible_msrv)]
 // The `declare_all_init_functions!` macro from envoy-proxy-dynamic-modules-rust-sdk
 // performs function-pointer comparisons internally for duplicate-registration detection;
@@ -44,11 +52,23 @@ fn program_init() -> bool {
     true
 }
 
-declare_all_init_functions!(
-  program_init,
-  bootstrap: new_bootstrap_extension_config,
-  http: new_http_filter_config,
-);
+// `declare_all_init_functions!` generates a `pub extern "C"` entry-point
+// function whose doc comment cannot be supplied from outside the macro.
+// The submodule below provides a scoped `#![allow(missing_docs)]` so the
+// generated function does not trigger the crate-level deny, while keeping
+// the lint active for all hand-written `pub` items.
+mod _init {
+    #![allow(missing_docs)]
+
+    use super::{new_bootstrap_extension_config, new_http_filter_config, program_init};
+    use envoy_proxy_dynamic_modules_rust_sdk::*;
+
+    declare_all_init_functions!(
+      program_init,
+      bootstrap: new_bootstrap_extension_config,
+      http: new_http_filter_config,
+    );
+}
 
 fn new_bootstrap_extension_config(
     envoy_config: &mut dyn EnvoyBootstrapExtensionConfig,

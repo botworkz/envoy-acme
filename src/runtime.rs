@@ -1,3 +1,4 @@
+//! Background runtime bridge that drives the [`AcmeStateMachine`](crate::acme::AcmeStateMachine) on a dedicated Tokio thread.
 use std::any::Any;
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -23,6 +24,11 @@ enum Command {
     PanicForTest,
 }
 
+/// Thread-safe handle to the background Tokio runtime that drives the ACME state machine.
+///
+/// Cloning a `RuntimeBridge` is cheap — it shares the same underlying channel and
+/// atomic flags.  `start`, `tick`, `shutdown`, and `is_alive` are safe to call
+/// from any thread.
 #[derive(Clone)]
 pub struct RuntimeBridge {
     tx: Arc<mpsc::Sender<Command>>,
@@ -36,6 +42,7 @@ pub struct RuntimeBridge {
 }
 
 impl RuntimeBridge {
+    /// Construct a `RuntimeBridge` backed by the real ACME issuer and a filesystem cert sink.
     pub fn new(config: Config) -> Self {
         Self::new_impl(config, |acme_config, sink| {
             AcmeStateMachine::new(acme_config, sink)
@@ -155,6 +162,7 @@ impl RuntimeBridge {
         }
     }
 
+    /// Send a `Start` command to the runtime thread, triggering the first ACME tick.
     pub fn start(&self) -> Result<(), RuntimeError> {
         // At boot the channel is empty; `try_send` will always succeed.
         // If it somehow races with a queued Tick (extremely unlikely), the
@@ -166,6 +174,7 @@ impl RuntimeBridge {
         }
     }
 
+    /// Send a `Tick` command to the runtime thread; coalesces if the channel is already full.
     pub fn tick(&self) -> Result<(), RuntimeError> {
         match self.tx.try_send(Command::Tick) {
             Ok(()) => Ok(()),
@@ -182,6 +191,7 @@ impl RuntimeBridge {
         }
     }
 
+    /// Send a `Shutdown` command, waiting for buffer space if the channel is full.
     pub fn shutdown(&self) -> Result<(), RuntimeError> {
         // `blocking_send` waits for buffer space if the channel is full,
         // ensuring Shutdown is never dropped.  Blocking briefly at shutdown
@@ -191,6 +201,7 @@ impl RuntimeBridge {
             .map_err(|_| RuntimeError::Stopped)
     }
 
+    /// Returns `true` if the runtime thread is running and ready to process ticks.
     pub fn is_alive(&self) -> bool {
         self.runtime_alive.load(Ordering::Acquire)
     }

@@ -1,7 +1,9 @@
+//! Error types for configuration parsing, certificate issuance, sink writes, and runtime failures.
 use thiserror::Error;
 
 use envoy_proxy_dynamic_modules_rust_sdk::abi::envoy_dynamic_module_type_metrics_result;
 
+/// Error encountered while parsing a YAML or JSON configuration payload.
 #[derive(Debug, Error)]
 pub enum ConfigError {
     #[error("json parse error: {0}")]
@@ -10,6 +12,7 @@ pub enum ConfigError {
     Yaml(#[from] serde_yaml::Error),
 }
 
+/// Error produced by a [`CertSink`](crate::cert_sink::CertSink) when writing certificate files.
 #[derive(Debug, Error)]
 pub enum SinkError {
     #[error("io error: {0}")]
@@ -18,6 +21,7 @@ pub enum SinkError {
     Persist(#[from] tempfile::PersistError),
 }
 
+/// Error produced during an ACME certificate issuance or renewal attempt.
 #[derive(Debug, Error)]
 pub enum AcmeError {
     #[error("acme protocol error: {0}")]
@@ -38,6 +42,7 @@ pub enum AcmeError {
     Timeout,
 }
 
+/// Error produced by the [`RuntimeBridge`](crate::runtime::RuntimeBridge) or during module bootstrap.
 #[derive(Debug, Error)]
 pub enum RuntimeError {
     #[error("failed to acquire state_dir lock: {0}")]
