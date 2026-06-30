@@ -17,51 +17,6 @@ pub type ChallengeMap = Arc<RwLock<HashMap<String, Entry>>>;
 
 static STORE: OnceLock<ChallengeMap> = OnceLock::new();
 
-#[cfg(test)]
-mod ttl_override {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::time::Duration;
-
-    /// Sentinel meaning "use the production default".
-    const UNSET: u64 = u64::MAX;
-
-    static TEST_TTL_MILLIS: AtomicU64 = AtomicU64::new(UNSET);
-
-    /// Override the challenge TTL for the duration of a single test.
-    /// Call [`reset`] in the same test to restore the production default.
-    pub fn set(d: Duration) {
-        TEST_TTL_MILLIS.store(
-            u64::try_from(d.as_millis()).expect("test TTL must fit in u64"),
-            Ordering::Relaxed,
-        );
-    }
-
-    /// Restore the TTL to the production default after a test override.
-    pub fn reset() {
-        TEST_TTL_MILLIS.store(UNSET, Ordering::Relaxed);
-    }
-
-    /// Return the currently active TTL (override if set, otherwise `None`).
-    pub fn get() -> Option<Duration> {
-        let v = TEST_TTL_MILLIS.load(Ordering::Relaxed);
-        if v != UNSET {
-            Some(Duration::from_millis(v))
-        } else {
-            None
-        }
-    }
-}
-
-/// Returns the effective TTL: the test override when set, otherwise
-/// [`CHALLENGE_TTL`].
-fn effective_ttl() -> Duration {
-    #[cfg(test)]
-    if let Some(d) = ttl_override::get() {
-        return d;
-    }
-    CHALLENGE_TTL
-}
-
 pub fn init() -> ChallengeMap {
     STORE
         .get_or_init(|| Arc::new(RwLock::new(HashMap::new())))
@@ -72,12 +27,10 @@ pub fn get() -> ChallengeMap {
     init()
 }
 
-/// Insert a challenge token.  Stale entries (older than the effective TTL)
-/// are swept from the map before the new entry is added, keeping the store
-/// bounded.
-pub fn insert(token: String, key_authorization: String) {
-    let store = get();
-    let ttl = effective_ttl();
+/// Insert a challenge token into `store` using the given `ttl`.  Stale entries
+/// (older than `ttl`) are swept from the map before the new entry is added,
+/// keeping the store bounded.
+fn insert_into(store: &ChallengeMap, token: String, key_authorization: String, ttl: Duration) {
     let now = Instant::now();
     let mut guard = store.write();
     guard.retain(|_, e| now.saturating_duration_since(e.created_at) <= ttl);
@@ -90,19 +43,17 @@ pub fn insert(token: String, key_authorization: String) {
     );
 }
 
-pub fn remove(token: &str) {
-    get().write().remove(token);
+/// Remove `token` from `store`.
+fn remove_from(store: &ChallengeMap, token: &str) {
+    store.write().remove(token);
 }
 
-/// Look up a challenge token.
+/// Look up `token` in `store` with the given `ttl`.
 ///
-/// Returns `None` immediately if the entry is absent or has exceeded the TTL.
+/// Returns `None` immediately if the entry is absent or has exceeded `ttl`.
 /// An expired entry is removed inline.  The common (non-expired) path holds
 /// only a read lock; the write lock is acquired only when eviction is needed.
-pub fn lookup(token: &str) -> Option<String> {
-    let store = get();
-    let ttl = effective_ttl();
-
+fn lookup_in(store: &ChallengeMap, token: &str, ttl: Duration) -> Option<String> {
     // Fast path: read lock only.
     {
         let guard = store.read();
@@ -127,55 +78,101 @@ pub fn lookup(token: &str) -> Option<String> {
     None
 }
 
+/// Insert a challenge token.  Stale entries (older than the effective TTL)
+/// are swept from the map before the new entry is added, keeping the store
+/// bounded.
+pub fn insert(token: String, key_authorization: String) {
+    insert_into(&get(), token, key_authorization, CHALLENGE_TTL);
+}
+
+/// Remove a challenge token.
+pub fn remove(token: &str) {
+    remove_from(&get(), token);
+}
+
+/// Look up a challenge token.
+///
+/// Returns `None` immediately if the entry is absent or has exceeded the TTL.
+/// An expired entry is removed inline.  The common (non-expired) path holds
+/// only a read lock; the write lock is acquired only when eviction is needed.
+pub fn lookup(token: &str) -> Option<String> {
+    lookup_in(&get(), token, CHALLENGE_TTL)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn fresh_store() -> ChallengeMap {
+        Arc::new(RwLock::new(HashMap::new()))
+    }
+
     #[test]
     fn insert_lookup_remove_roundtrip() {
-        insert("token-a".to_string(), "key-auth".to_string());
-        assert_eq!(lookup("token-a"), Some("key-auth".to_string()));
-        remove("token-a");
-        assert_eq!(lookup("token-a"), None);
+        let store = fresh_store();
+        let ttl = Duration::from_secs(60);
+        insert_into(&store, "token-a".to_string(), "key-auth".to_string(), ttl);
+        assert_eq!(
+            lookup_in(&store, "token-a", ttl),
+            Some("key-auth".to_string())
+        );
+        remove_from(&store, "token-a");
+        assert_eq!(lookup_in(&store, "token-a", ttl), None);
     }
 
     #[test]
     fn entry_is_returned_before_ttl_expires() {
-        ttl_override::set(Duration::from_millis(200));
+        let store = fresh_store();
+        let ttl = Duration::from_millis(200);
         let token = "token-ttl-valid";
-        insert(token.to_string(), "key-auth-valid".to_string());
+        insert_into(&store, token.to_string(), "key-auth-valid".to_string(), ttl);
         // Immediate lookup must succeed (well within TTL).
-        assert_eq!(lookup(token), Some("key-auth-valid".to_string()));
-        remove(token);
-        ttl_override::reset();
+        assert_eq!(
+            lookup_in(&store, token, ttl),
+            Some("key-auth-valid".to_string())
+        );
     }
 
     #[test]
     fn entry_returns_none_after_ttl_expires() {
-        ttl_override::set(Duration::from_millis(50));
+        let store = fresh_store();
+        let ttl = Duration::from_millis(50);
         let token = "token-ttl-expired";
-        insert(token.to_string(), "key-auth-expired".to_string());
+        insert_into(
+            &store,
+            token.to_string(),
+            "key-auth-expired".to_string(),
+            ttl,
+        );
         std::thread::sleep(Duration::from_millis(100));
-        assert_eq!(lookup(token), None);
+        assert_eq!(lookup_in(&store, token, ttl), None);
         // Confirm the entry has been removed from the map.
-        assert!(!get().read().contains_key(token));
-        ttl_override::reset();
+        assert!(!store.read().contains_key(token));
     }
 
     #[test]
     fn insert_sweeps_expired_entries() {
-        ttl_override::set(Duration::from_millis(50));
+        let store = fresh_store();
+        let ttl = Duration::from_millis(50);
         let old_token = "token-sweep-old";
         let new_token = "token-sweep-new";
-        insert(old_token.to_string(), "key-auth-old".to_string());
+        insert_into(
+            &store,
+            old_token.to_string(),
+            "key-auth-old".to_string(),
+            ttl,
+        );
         std::thread::sleep(Duration::from_millis(100));
         // Inserting a new entry must sweep the expired old entry.
-        insert(new_token.to_string(), "key-auth-new".to_string());
+        insert_into(
+            &store,
+            new_token.to_string(),
+            "key-auth-new".to_string(),
+            ttl,
+        );
         assert!(
-            !get().read().contains_key(old_token),
+            !store.read().contains_key(old_token),
             "expired entry should be swept on insert"
         );
-        remove(new_token);
-        ttl_override::reset();
     }
 }
