@@ -13,8 +13,12 @@ test:
 	cargo test
 
 coverage:
+	# --exclude-files: see CONTRIBUTING.md "Coverage exclusions" — reserved
+	# for code that genuinely cannot be unit-tested (currently only FFI
+	# entry points in src/lib.rs).
 	cargo tarpaulin \
 		--workspace \
+		--exclude-files 'src/lib.rs' \
 		--timeout 180 \
 		--out Html \
 		--output-dir target/tarpaulin \
