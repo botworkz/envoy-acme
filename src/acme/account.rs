@@ -444,7 +444,7 @@ mod tests {
         let server = MockAcmeServer::start(|base_url| {
             ResponseTable::new()
                 .with_directory(base_url)
-                .with_new_nonce("nonce-create-1")
+                .with_new_nonce("nonce-create-1") // lgtm[rust/hard-coded-cryptographic-value]
                 .with_new_account_success(&format!("{base_url}/acme/acct/1"))
         })
         .await;
@@ -489,7 +489,7 @@ mod tests {
         let server = MockAcmeServer::start(|base_url| {
             ResponseTable::new()
                 .with_directory(base_url)
-                .with_new_nonce("nonce-load-1")
+                .with_new_nonce("nonce-load-1") // lgtm[rust/hard-coded-cryptographic-value]
         })
         .await;
 
@@ -571,7 +571,7 @@ mod tests {
         let server = MockAcmeServer::start(|base_url| {
             ResponseTable::new()
                 .with_directory(base_url)
-                .with_new_nonce("nonce-400-1")
+                .with_new_nonce("nonce-400-1") // lgtm[rust/hard-coded-cryptographic-value]
                 .with(
                     "POST",
                     "/acme/new-acct",
@@ -642,7 +642,7 @@ mod tests {
         let server = MockAcmeServer::start(|base_url| {
             ResponseTable::new()
                 .with_directory(base_url)
-                .with_new_nonce("nonce-write-fail")
+                .with_new_nonce("nonce-write-fail") // lgtm[rust/hard-coded-cryptographic-value]
                 .with_new_account_success(&format!("{base_url}/acme/acct/1"))
         })
         .await;
