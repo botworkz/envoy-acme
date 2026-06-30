@@ -218,7 +218,7 @@ mod tests {
     }
 
     #[test]
-    fn normalize_host_ipv6_non_digit_after_bracket_returns_unchanged() {
+    fn normalize_host_ipv6_non_numeric_port_unchanged() {
         // After ']' comes ':port' where port is not all digits — leave unchanged.
         assert_eq!(normalize_host(b"[::1]:port"), "[::1]:port");
     }
