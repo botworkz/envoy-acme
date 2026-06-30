@@ -59,7 +59,10 @@ pub fn classify_acme_error(e: &AcmeError) -> ErrorClass {
         // they are not ACME-server-side; don't trigger the long back-off.
         AcmeError::Sink(_) | AcmeError::Io(_) | AcmeError::CertGen(_) => ErrorClass::Permanent,
         // A timeout is a connectivity problem, not a CA rate-limit signal;
-        // treat as transient so backoff does not escalate.
+        // classify as Transient so the ordinary retry-on-next-tick path is
+        // taken and the exponential back-off (RateLimited) does not escalate.
+        // The failure counter still increments via metrics, but
+        // `record_rate_limit` is never called.
         AcmeError::Timeout => ErrorClass::Transient,
         // JSON parse, order failures, missing challenge: transient enough
         // to retry next tick without a long delay.

@@ -344,7 +344,7 @@ impl AcmeStateMachine {
                 // and retries on the next ordinary tick interval.
                 Err(e)
             }
-            Err(_elapsed) => {
+            Err(_) => {
                 let elapsed = issuance_started.elapsed();
                 metrics::record_issuance_failure(domain, elapsed);
                 metrics::set_consecutive_failures(domain, self.backoff.consecutive_failures);
