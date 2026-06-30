@@ -64,14 +64,7 @@ pub enum ErrorClass {
 pub fn classify_acme_error(e: &AcmeError) -> ErrorClass {
     match e {
         AcmeError::Protocol(inner) => classify_protocol_error(inner),
-        // Sink / IO / cert-gen errors are permanent in the sense that
-        // they are not ACME-server-side; don't trigger the long back-off.
         AcmeError::Sink(_) | AcmeError::Io(_) | AcmeError::CertGen(_) => ErrorClass::Permanent,
-        // A timeout is a connectivity problem, not a CA rate-limit signal;
-        // classify as Transient so the ordinary retry-on-next-tick path is
-        // taken and the exponential back-off (RateLimited) does not escalate.
-        // The failure counter still increments via metrics, but
-        // `record_rate_limit` is never called.
         AcmeError::Timeout => ErrorClass::Transient,
         // JSON parse, order failures, missing challenge: transient enough
         // to retry next tick without a long delay.
@@ -111,10 +104,6 @@ fn classify_problem(p: &instant_acme::Problem) -> ErrorClass {
     }
     ErrorClass::Transient
 }
-
-// ---------------------------------------------------------------------------
-// Backoff state
-// ---------------------------------------------------------------------------
 
 const BASE_DELAY_SECS: i64 = 60;
 const MAX_DELAY_SECS: i64 = 24 * 60 * 60; // 24 h
@@ -165,8 +154,7 @@ impl BackoffState {
 
     /// Record one rate-limit failure and update `next_retry_at`.
     pub fn record_rate_limit(&mut self, now_unix: i64) {
-        // The exponent is 0-based (first failure → 60 s, second → 120 s, …).
-        let exp = self.consecutive_failures; // current count before increment
+        let exp = self.consecutive_failures;
         self.consecutive_failures += 1;
         self.next_retry_at = Some(compute_next_retry_at(now_unix, exp));
     }
@@ -178,16 +166,11 @@ impl BackoffState {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn make_rate_limited_error() -> AcmeError {
-        // Build a Problem document with the rate-limit type URN.
         let problem: instant_acme::Problem = serde_json::from_value(serde_json::json!({
             "type": "urn:ietf:params:acme:error:rateLimited",
             "detail": "too many requests",
@@ -287,7 +270,6 @@ mod tests {
         let mut s = BackoffState::default();
         assert!(!s.is_blocked(1000));
         s.record_rate_limit(1000);
-        // next_retry_at must be > 1000
         assert!(s.next_retry_at.unwrap() > 1000);
         assert!(s.is_blocked(1001));
         assert!(!s.is_blocked(s.next_retry_at.unwrap() + 1));
