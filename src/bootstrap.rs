@@ -44,6 +44,7 @@ impl AcmeBootstrapConfig {
                 return Err(RuntimeError::Bootstrap(e));
             }
         }
+        warn_if_state_dir_too_permissive(&config.acme.state_dir);
 
         // `?` works directly here: errors.rs has `impl From<envoy_dynamic_module_type_metrics_result> for RuntimeError`.
         metrics::init(envoy_config)?;
@@ -101,6 +102,39 @@ fn handle_runtime_tick_result<F>(
         }
     }
 }
+
+/// Warn at startup if `state_dir` has group- or world-readable/writable/executable
+/// bits set.  On non-Unix targets this is a no-op.
+///
+/// The warning can be suppressed by setting `ENVOY_ACME_ALLOW_INSECURE_STATE_DIR=1`
+/// (e.g. on hosts where looser permissions are intentional for monitoring).
+#[cfg(unix)]
+fn warn_if_state_dir_too_permissive(state_dir: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    if std::env::var_os("ENVOY_ACME_ALLOW_INSECURE_STATE_DIR").is_some() {
+        return;
+    }
+    let Ok(meta) = std::fs::metadata(state_dir) else {
+        return;
+    };
+    let mode = meta.permissions().mode() & 0o777;
+    let leaked = mode & 0o077;
+    if leaked != 0 {
+        tracing::warn!(
+            state_dir = %state_dir.display(),
+            mode = format!("{:04o}", mode),
+            leaked_bits = format!("{:04o}", leaked),
+            "envoy-acme: state_dir is group- or world-accessible; \
+             account.json and backoff.json may be readable to other local users. \
+             Recommended: chmod 0700 {}. \
+             Set ENVOY_ACME_ALLOW_INSECURE_STATE_DIR=1 to suppress this warning.",
+            state_dir.display(),
+        );
+    }
+}
+
+#[cfg(not(unix))]
+fn warn_if_state_dir_too_permissive(_state_dir: &Path) {}
 
 /// Verify that `dir` can be created (if missing) and written to.
 ///
@@ -470,6 +504,79 @@ mod tests {
 
         std::fs::set_permissions(&readonly, std::fs::Permissions::from_mode(0o755))
             .expect("restore perms");
+    }
+
+    // =========================================================================
+    // warn_if_state_dir_too_permissive tests
+    // =========================================================================
+
+    #[cfg(unix)]
+    #[traced_test]
+    #[test]
+    fn warn_if_state_dir_too_permissive_warns_on_0755() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o755))
+            .expect("set perms");
+
+        // Ensure opt-out env var is not set.
+        std::env::remove_var("ENVOY_ACME_ALLOW_INSECURE_STATE_DIR");
+
+        warn_if_state_dir_too_permissive(tmp.path());
+
+        assert!(logs_contain("group- or world-accessible"));
+        assert!(logs_contain("0755"));
+    }
+
+    #[cfg(unix)]
+    #[traced_test]
+    #[test]
+    fn warn_if_state_dir_too_permissive_quiet_on_0700() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o700))
+            .expect("set perms");
+
+        std::env::remove_var("ENVOY_ACME_ALLOW_INSECURE_STATE_DIR");
+
+        warn_if_state_dir_too_permissive(tmp.path());
+
+        assert!(!logs_contain("group- or world-accessible"));
+    }
+
+    #[cfg(unix)]
+    #[traced_test]
+    #[test]
+    fn warn_if_state_dir_too_permissive_quiet_on_env_opt_out() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o755))
+            .expect("set perms");
+
+        std::env::set_var("ENVOY_ACME_ALLOW_INSECURE_STATE_DIR", "1");
+
+        warn_if_state_dir_too_permissive(tmp.path());
+
+        std::env::remove_var("ENVOY_ACME_ALLOW_INSECURE_STATE_DIR");
+
+        assert!(!logs_contain("group- or world-accessible"));
+    }
+
+    #[cfg(unix)]
+    #[traced_test]
+    #[test]
+    fn warn_if_state_dir_too_permissive_quiet_when_missing() {
+        let nonexistent = std::path::Path::new("/tmp/envoy_acme_test_nonexistent_dir_xyz_99999");
+
+        std::env::remove_var("ENVOY_ACME_ALLOW_INSECURE_STATE_DIR");
+
+        // Must not panic; metadata() returns Err for missing path.
+        warn_if_state_dir_too_permissive(nonexistent);
+
+        assert!(!logs_contain("group- or world-accessible"));
     }
 
     // =========================================================================
