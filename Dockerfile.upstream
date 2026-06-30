@@ -9,7 +9,7 @@ RUN --mount=type=tmpfs,target=/var/cache/apt \
     --mount=type=tmpfs,target=/var/lib/apt/lists \
     apt-get -qq update \
  && apt-get -qq install -y --no-install-recommends ca-certificates curl \
- && test -n "${TARGETARCH}" || (echo "TARGETARCH build arg must be set" >&2 && exit 1) \
+ && test -n "${TARGETARCH}" || (echo "TARGETARCH build arg must be set (enable BuildKit and set --platform)" >&2 && exit 1) \
  && BASE_URL="https://github.com/envoyproxy/toolshed/releases/download/bins-v${BINS_VERSION}" \
  && BIN="echo-${ECHO_VERSION}-${TARGETARCH}" \
  && curl -fsSL "${BASE_URL}/${BIN}" -o "/tmp/${BIN}" \
@@ -18,8 +18,11 @@ RUN --mount=type=tmpfs,target=/var/cache/apt \
  && awk -v bin="${BIN}" '$2 == bin { print; found=1 } END { exit !found }' checksums.txt.asc > "${BIN}.sha256" \
  && sha256sum -c "${BIN}.sha256" \
  && install -D -m 0755 "/tmp/${BIN}" /out/echo
+# Integrity is enforced via sha256sum against entries extracted from the
+# signed checksums manifest.
 # TODO: add `gpg --verify checksums.txt.asc` once envoyproxy publishes a
-# pin-able public key fingerprint for the publish-envoy bot.
+# pin-able public key fingerprint for the publish-envoy bot to add explicit
+# authenticity verification of the signed manifest.
 
 FROM gcr.io/distroless/base-nossl-debian12:nonroot
 COPY --from=fetch /out/echo /usr/local/bin/echo
