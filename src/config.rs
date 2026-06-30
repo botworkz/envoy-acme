@@ -1150,7 +1150,7 @@ aceme:
 
     // An `xn--`-prefixed A-label is accepted (the RFC 5891 §4.2.3.1 exception).
     // This is the same domain covered by idn_a_label_passes_through_unchanged;
-    // this test explicitly documents that CheckThirdAndFourth does not break A-labels.
+    // this test explicitly documents that Hyphens::Check does not break A-labels.
     #[test]
     fn idn_accepts_xn_prefixed_a_label() {
         let raw = base_yaml("directory_uri: https://example.invalid/directory").replace(
