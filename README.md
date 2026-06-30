@@ -323,6 +323,32 @@ export ENVOY_ACME_ALLOW_INSECURE_STATE_DIR=1
 
 This check is Unix-only.  On non-Unix targets it is a compile-time no-op.
 
+### Filesystem placement of `state_dir` and `cert_sink.cert_dir`
+
+Place both directories on the same filesystem when possible.  Atomic file
+writes within each directory are correct regardless (the temp file is always
+created in the same directory as the destination), but cross-filesystem
+configurations surface `EXDEV` errors as `Permanent`-class issuance failures
+if any code path renames between them.
+
+At startup, if `state_dir` and `cert_dir` resolve to different filesystem
+device numbers, envoy-acme logs a single `WARN` message:
+
+```
+WARN envoy-acme: state_dir and cert_dir are on different filesystems. ...
+     Set ENVOY_ACME_ALLOW_CROSS_FS_DIRS=1 to suppress this warning.
+```
+
+If the configuration is intentional (e.g. local SSD for `state_dir`, shared
+NFS/iSCSI volume for `cert_dir` that Envoy reads via SDS), set the environment
+variable `ENVOY_ACME_ALLOW_CROSS_FS_DIRS=1` to suppress the warning:
+
+```bash
+export ENVOY_ACME_ALLOW_CROSS_FS_DIRS=1
+```
+
+This check is Unix-only.  On non-Unix targets it is a compile-time no-op.
+
 ## Metrics
 
 The module exposes the following Prometheus metrics via Envoy's built-in stats sink.
