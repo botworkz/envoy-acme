@@ -8,6 +8,8 @@ on:
 
 permissions:
   contents: write
+  id-token: write
+  attestations: write
 
 jobs:
   fmt:
@@ -185,8 +187,18 @@ jobs:
       if: always()
       run: docker compose down -v
 
+  deny:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - uses: dtolnay/rust-toolchain@stable
+    - uses: Swatinem/rust-cache@v2
+      with:
+        shared-key: deny
+    - uses: EmbarkStudios/cargo-deny-action@v2
+
   release:
-    needs: [fmt, clippy, build, unit, integration, coverage]
+    needs: [fmt, clippy, build, unit, integration, coverage, deny]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
@@ -245,6 +257,54 @@ jobs:
         test -s "${staged}"
         sha256sum "${staged}" > "${staged}.sha256"
 
+    - name: Install syft (SBOM generator)
+      if: steps.gate.outputs.skip == 'false'
+      uses: anchore/sbom-action/download-syft@v0
+
+    - name: Generate SBOM
+      if: steps.gate.outputs.skip == 'false'
+      shell: bash
+      run: |
+        set -euo pipefail
+        staged="dist/libenvoy_acme-${{ steps.gate.outputs.version }}-x86_64-unknown-linux-gnu.so"
+        syft packages . \
+          --source-name "envoy_acme" \
+          --source-version "${{ steps.gate.outputs.version }}" \
+          -o cyclonedx-json \
+          --file "dist/envoy_acme-${{ steps.gate.outputs.version }}.sbom.json"
+
+    - name: Install cosign
+      if: steps.gate.outputs.skip == 'false'
+      uses: sigstore/cosign-installer@v3
+
+    - name: Sign release artifact and SBOM (keyless / OIDC)
+      if: steps.gate.outputs.skip == 'false'
+      shell: bash
+      run: |
+        set -euo pipefail
+        staged="dist/libenvoy_acme-${{ steps.gate.outputs.version }}-x86_64-unknown-linux-gnu.so"
+        sbom="dist/envoy_acme-${{ steps.gate.outputs.version }}.sbom.json"
+
+        cosign sign-blob \
+          --yes \
+          --output-signature "${staged}.sig" \
+          --output-certificate "${staged}.pem" \
+          "${staged}"
+
+        cosign sign-blob \
+          --yes \
+          --output-signature "${sbom}.sig" \
+          --output-certificate "${sbom}.pem" \
+          "${sbom}"
+
+    - name: Attest build provenance (SLSA v1)
+      if: steps.gate.outputs.skip == 'false'
+      uses: actions/attest-build-provenance@v2
+      with:
+        subject-path: |
+          dist/libenvoy_acme-${{ steps.gate.outputs.version }}-x86_64-unknown-linux-gnu.so
+          dist/envoy_acme-${{ steps.gate.outputs.version }}.sbom.json
+
     - name: Publish GitHub release
       if: steps.gate.outputs.skip == 'false'
       uses: softprops/action-gh-release@v2
@@ -255,3 +315,8 @@ jobs:
         files: |
           dist/libenvoy_acme-${{ steps.gate.outputs.version }}-x86_64-unknown-linux-gnu.so
           dist/libenvoy_acme-${{ steps.gate.outputs.version }}-x86_64-unknown-linux-gnu.so.sha256
+          dist/libenvoy_acme-${{ steps.gate.outputs.version }}-x86_64-unknown-linux-gnu.so.sig
+          dist/libenvoy_acme-${{ steps.gate.outputs.version }}-x86_64-unknown-linux-gnu.so.pem
+          dist/envoy_acme-${{ steps.gate.outputs.version }}.sbom.json
+          dist/envoy_acme-${{ steps.gate.outputs.version }}.sbom.json.sig
+          dist/envoy_acme-${{ steps.gate.outputs.version }}.sbom.json.pem
