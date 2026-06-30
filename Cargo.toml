@@ -11,6 +11,7 @@ description = "Envoy ACME dynamic module prototype"
 crate-type = ["cdylib"]
 
 [dependencies]
+async-trait = "0.1"
 # Envoy v1.38.x SDK path (dynamic modules Rust SDK is consumed from Envoy repo tags).
 envoy-proxy-dynamic-modules-rust-sdk = { git = "https://github.com/envoyproxy/envoy", rev = "f1dd21b16c244bda00edfb5ffce577e12d0d2ec2", package = "envoy-proxy-dynamic-modules-rust-sdk" }
 instant-acme = "0.7"
