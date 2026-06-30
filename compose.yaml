@@ -23,13 +23,42 @@ services:
     - "14000:14000"
     - "15000:15000"
 
+  # Healthcheck-only sidecar for pebble's HTTPS directory endpoint.
+  #
+  # The pebble image is distroless (no shell, no curl, no wget), so we
+  # can't put a compose healthcheck on the pebble service itself. This
+  # container exists only so envoy can gate on `service_healthy`: it
+  # sleeps forever and lets the compose healthcheck do the real work,
+  # polling https://pebble:14000/dir over the compose network with
+  # `--cacert pebble.minica.pem` (same CA the integration test trusts).
+  # The probe only succeeds once pebble has finished its TLS startup,
+  # which is what the envoy-acme module needs before its first ACME
+  # tick.
+  #
+  # TODO: replace with a proper distroless-image healthcheck pattern.
+  pebble-ready:
+    image: curlimages/curl:latest
+    depends_on:
+    - pebble
+    volumes:
+    - ./config/pebble-certs/pebble.minica.pem:/pebble.minica.pem:ro
+    command: ["sleep", "infinity"]
+    healthcheck:
+      test: ["CMD", "curl", "-sSf", "--cacert", "/pebble.minica.pem", "https://pebble:14000/dir"]
+      interval: 1s
+      timeout: 2s
+      retries: 30
+      start_period: 1s
+
   envoy:
     build:
       context: .
       dockerfile: Dockerfile
     depends_on:
-    - pebble
-    - upstream
+      pebble-ready:
+        condition: service_healthy
+      upstream:
+        condition: service_started
     ports:
     - "8080:80"
     - "8443:443"
