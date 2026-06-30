@@ -119,6 +119,28 @@ pub(crate) fn record_issuance_failure(_domain: &str, duration: Duration) {
     ]);
 }
 
+pub(crate) fn record_issuance_permanent(_domain: &str, duration: Duration) {
+    enqueue_many(vec![
+        MetricUpdate::IssuanceTotal {
+            result: "permanent",
+        },
+        MetricUpdate::IssuanceDuration {
+            seconds: duration_to_seconds(duration),
+        },
+    ]);
+}
+
+pub(crate) fn record_issuance_recovery_required(_domain: &str, duration: Duration) {
+    enqueue_many(vec![
+        MetricUpdate::IssuanceTotal {
+            result: "recovery_required",
+        },
+        MetricUpdate::IssuanceDuration {
+            seconds: duration_to_seconds(duration),
+        },
+    ]);
+}
+
 pub(crate) fn set_consecutive_failures(domain: &str, count: u32) {
     enqueue(MetricUpdate::ConsecutiveFailures {
         domain: domain.to_string(),
@@ -216,50 +238,74 @@ fn duration_to_seconds(duration: Duration) -> u64 {
         .saturating_add(u64::from(duration.subsec_nanos() > 0))
 }
 
+// ---------------------------------------------------------------------------
+// Test-only recorder
+//
+// `cargo test` runs tests in parallel by default. The previous implementation
+// kept observed metric updates in a process-global `Vec` and gated cross-test
+// races behind a single opt-in `test_lock()` mutex. That left two failure
+// modes:
+//
+//   1. Tests that do not hold `test_lock()` (e.g. those that only care about
+//      tick side-effects, not metric contents) still call into `enqueue_many`
+//      via `tick_at`, so they push entries into the shared `Vec`.
+//   2. Negative assertions in metrics-aware tests (e.g.
+//      `!metrics.contains("envoy_acme_issuance_total:failure")`) then see
+//      those foreign entries and panic, which in turn poisons `test_lock()`
+//      and cascades into ~18 secondary "failures" per CI run.
+//
+// Replacing the global `Vec` with a thread-local `RefCell` makes the recorder
+// inherently per-test: each test thread sees only its own enqueues, so
+// concurrent tests on other threads can never contaminate the assertion.
+// `test_lock()` is still needed for tests that mutate `metrics_state()` (the
+// `Option<Arc<MetricsState>>` shared across the whole process), but it is no
+// longer load-bearing for the observation buffer.
+// ---------------------------------------------------------------------------
+
 #[cfg(test)]
-fn test_updates() -> &'static Mutex<Vec<MetricUpdate>> {
-    static TEST_UPDATES: OnceLock<Mutex<Vec<MetricUpdate>>> = OnceLock::new();
-    TEST_UPDATES.get_or_init(|| Mutex::new(Vec::new()))
+thread_local! {
+    static TEST_UPDATES: std::cell::RefCell<Vec<MetricUpdate>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 #[cfg(test)]
 fn record_test_updates(updates: &[MetricUpdate]) {
-    test_updates().lock().unwrap().extend_from_slice(updates);
+    TEST_UPDATES.with(|cell| cell.borrow_mut().extend_from_slice(updates));
 }
 
 #[cfg(test)]
 pub(crate) fn reset_test_state() {
     *metrics_state().lock().unwrap() = None;
-    test_updates().lock().unwrap().clear();
+    TEST_UPDATES.with(|cell| cell.borrow_mut().clear());
 }
 
 #[cfg(test)]
 pub(crate) fn take_test_updates() -> Vec<String> {
-    test_updates()
-        .lock()
-        .unwrap()
-        .drain(..)
-        .map(|update| match update {
-            MetricUpdate::IssuanceTotal { result } => {
-                format!("envoy_acme_issuance_total:{result}")
-            }
-            MetricUpdate::ConsecutiveFailures { domain, count } => {
-                format!("envoy_acme_consecutive_failures:{domain}:{count}")
-            }
-            MetricUpdate::NextRetryAt { domain, unix_ts } => {
-                format!("envoy_acme_next_retry_at_seconds:{domain}:{unix_ts}")
-            }
-            MetricUpdate::CertNotAfter { domain, unix_ts } => {
-                format!("envoy_acme_cert_not_after_seconds:{domain}:{unix_ts}")
-            }
-            MetricUpdate::IssuanceDuration { seconds } => {
-                format!("envoy_acme_issuance_duration_seconds:{seconds}")
-            }
-        })
-        .collect()
+    TEST_UPDATES.with(|cell| {
+        cell.borrow_mut()
+            .drain(..)
+            .map(|update| match update {
+                MetricUpdate::IssuanceTotal { result } => {
+                    format!("envoy_acme_issuance_total:{result}")
+                }
+                MetricUpdate::ConsecutiveFailures { domain, count } => {
+                    format!("envoy_acme_consecutive_failures:{domain}:{count}")
+                }
+                MetricUpdate::NextRetryAt { domain, unix_ts } => {
+                    format!("envoy_acme_next_retry_at_seconds:{domain}:{unix_ts}")
+                }
+                MetricUpdate::CertNotAfter { domain, unix_ts } => {
+                    format!("envoy_acme_cert_not_after_seconds:{domain}:{unix_ts}")
+                }
+                MetricUpdate::IssuanceDuration { seconds } => {
+                    format!("envoy_acme_issuance_duration_seconds:{seconds}")
+                }
+            })
+            .collect()
+    })
 }
 
-/// Serialization guard for tests that touch the shared in-process metrics state.
+/// Serialization guard for tests that touch the shared in-process metrics state
+/// (`metrics_state()` / `MetricsState`).
 ///
 /// **Only safe in `current_thread` tokio test runtimes** — the returned
 /// `MutexGuard` is `!Send` and would deadlock if held across an `.await`
@@ -267,6 +313,11 @@ pub(crate) fn take_test_updates() -> Vec<String> {
 /// different worker. All our metrics tests use `#[tokio::test]` which is
 /// current-thread by default, so this is fine; do not copy this pattern to a
 /// multi-thread test without switching to `tokio::sync::Mutex`.
+///
+/// **This lock does NOT cover the test-update recorder.** That recorder is a
+/// thread-local (`TEST_UPDATES`), so it is automatically isolated per test
+/// thread — no lock is needed and contamination from concurrent tests on other
+/// threads is structurally impossible.
 #[cfg(test)]
 pub(crate) fn test_lock() -> std::sync::MutexGuard<'static, ()> {
     static TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();

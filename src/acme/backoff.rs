@@ -14,9 +14,14 @@
 //!   bad-nonce retry exhausted, order timeout, etc.).  The caller can retry
 //!   on the next ordinary tick without a long back-off.
 //!
-//! - [`ErrorClass::Permanent`] — errors that cannot be resolved by retrying
-//!   (e.g. key-generation failure, sink I/O error).  Currently unused for
-//!   backoff decisions; the tick returns the error to the caller as usual.
+//! - [`ErrorClass::Permanent`] — bug-class errors that retrying will not fix
+//!   (e.g. `malformed`, key-generation failure, sink I/O error).  The tick
+//!   logs at `error!` level and returns the error to the caller.
+//!
+//! - [`ErrorClass::RecoveryRequired`] — operator-action-required errors that
+//!   retrying will not fix (e.g. `accountDoesNotExist`, `unauthorized`).
+//!   The tick logs at `error!` level (rate-limited to once per 60 s) and
+//!   returns the error to the caller.
 //!
 //! **Limitation**: `instant-acme` wraps every non-2xx response body as a
 //! `Problem` document.  If the ACME server returns HTTP 429 *without* a
@@ -47,8 +52,12 @@ pub enum ErrorClass {
     RateLimited,
     /// Transient error; retry on the next ordinary tick.
     Transient,
-    /// Permanent error that won't be resolved by retrying.
+    /// Permanent bug-class error that won't be resolved by retrying
+    /// (e.g. `malformed`, key-generation failure, sink I/O error).
     Permanent,
+    /// Operator action required; retrying produces the same error every tick
+    /// (e.g. `accountDoesNotExist`, `unauthorized`).
+    RecoveryRequired,
 }
 
 /// Inspect `e` and return the appropriate [`ErrorClass`].
@@ -84,6 +93,16 @@ fn classify_problem(p: &instant_acme::Problem) -> ErrorClass {
     if let Some(t) = &p.r#type {
         if t.ends_with("rateLimited") {
             return ErrorClass::RateLimited;
+        }
+        // Operator-action-required: the local account.json references an
+        // account the server no longer recognises, or domain validation was
+        // revoked.  Retrying produces the same error every tick.
+        if t.ends_with("accountDoesNotExist") || t.ends_with("unauthorized") {
+            return ErrorClass::RecoveryRequired;
+        }
+        // Bug-class: malformed request shape.  Retrying won't fix it.
+        if t.ends_with("malformed") {
+            return ErrorClass::Permanent;
         }
     }
     // Some servers embed the HTTP status directly in the problem document.
@@ -204,6 +223,47 @@ mod tests {
 
     #[test]
     fn classify_other_problem_is_transient() {
+        assert_eq!(
+            classify_acme_error(&make_bad_nonce_error()),
+            ErrorClass::Transient,
+        );
+    }
+
+    #[test]
+    fn classify_account_does_not_exist_is_recovery_required() {
+        let problem: instant_acme::Problem = serde_json::from_value(serde_json::json!({
+            "type": "urn:ietf:params:acme:error:accountDoesNotExist",
+            "detail": "account not found"
+        }))
+        .unwrap();
+        let e = AcmeError::Protocol(instant_acme::Error::Api(problem));
+        assert_eq!(classify_acme_error(&e), ErrorClass::RecoveryRequired);
+    }
+
+    #[test]
+    fn classify_unauthorized_is_recovery_required() {
+        let problem: instant_acme::Problem = serde_json::from_value(serde_json::json!({
+            "type": "urn:ietf:params:acme:error:unauthorized",
+            "detail": "not authorized for domain"
+        }))
+        .unwrap();
+        let e = AcmeError::Protocol(instant_acme::Error::Api(problem));
+        assert_eq!(classify_acme_error(&e), ErrorClass::RecoveryRequired);
+    }
+
+    #[test]
+    fn classify_malformed_is_permanent() {
+        let problem: instant_acme::Problem = serde_json::from_value(serde_json::json!({
+            "type": "urn:ietf:params:acme:error:malformed",
+            "detail": "request was malformed"
+        }))
+        .unwrap();
+        let e = AcmeError::Protocol(instant_acme::Error::Api(problem));
+        assert_eq!(classify_acme_error(&e), ErrorClass::Permanent);
+    }
+
+    #[test]
+    fn classify_bad_nonce_stays_transient() {
         assert_eq!(
             classify_acme_error(&make_bad_nonce_error()),
             ErrorClass::Transient,
