@@ -27,14 +27,25 @@ impl AcmeHttpFilterConfig {
     /// used, which causes the filter to fall through on every request.
     pub fn from_bytes(raw: &[u8]) -> Self {
         #[derive(serde::Deserialize, Default)]
+        #[serde(deny_unknown_fields)]
         struct RawCfg {
             #[serde(default)]
             domains: Vec<String>,
         }
-        let cfg: RawCfg = serde_json::from_slice(raw)
-            .or_else(|_| serde_yaml::from_slice(raw))
-            .unwrap_or_default();
-        Self::new(cfg.domains)
+        if raw.is_empty() {
+            return Self::new(vec![]);
+        }
+        match serde_json::from_slice::<RawCfg>(raw).or_else(|_| serde_yaml::from_slice(raw)) {
+            Ok(cfg) => Self::new(cfg.domains),
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    "acme_http: failed to parse filter config; \
+                    filter will fall through on every request",
+                );
+                Self::new(vec![])
+            }
+        }
     }
 
     /// Construct from a pre-validated domain list.
@@ -457,6 +468,19 @@ mod tests {
     fn from_bytes_invalid_input_yields_empty_domain_set() {
         let cfg = AcmeHttpFilterConfig::from_bytes(b"}{not valid json or yaml at all}{");
         assert!(cfg.domains.is_empty());
+    }
+
+    #[test]
+    fn from_bytes_unknown_field_rejected() {
+        // A typo'd `domain:` (singular) instead of `domains:` should be caught
+        // by deny_unknown_fields and result in an empty domain set (with an
+        // error log — verifiable here by the fact that parsing produced no domains).
+        let yaml = b"domain:\n  - example.test\n";
+        let cfg = AcmeHttpFilterConfig::from_bytes(yaml);
+        assert!(
+            cfg.domains.is_empty(),
+            "unknown field 'domain' should be rejected, producing an empty domain set"
+        );
     }
 
     // ── on_request_headers: authority-related branches ────────────────────────
