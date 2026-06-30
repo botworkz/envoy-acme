@@ -2345,4 +2345,148 @@ mod tests {
             "expected failure metric; got {metrics:?}"
         );
     }
+
+    // ────────────────────────────────────────────────────────────────────────
+    // emit_heartbeat: checked_add overflow path
+    //
+    // When `now_unix` is close to `i64::MAX`, adding `tick_seconds` overflows
+    // `i64::checked_add`, so `next_attempt_at_unix` is `None` in the log.
+    // ────────────────────────────────────────────────────────────────────────
+
+    #[traced_test]
+    #[tokio::test]
+    async fn emit_heartbeat_with_overflowing_now_unix() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        struct DevNull;
+        impl CertSink for DevNull {
+            fn publish(&self, _: &str, _: &CertBundle) -> Result<(), SinkError> {
+                Ok(())
+            }
+        }
+
+        // Immediate error issuer so the tick completes quickly.
+        let issuer = Box::new(MockIssuer::with_results(vec![Err(AcmeError::OrderFailed(
+            "mock".into(),
+        ))]));
+        let mut sm =
+            AcmeStateMachine::new_with_issuer(test_config(tmp.path()), Box::new(DevNull), issuer);
+        // Force heartbeat on every tick.
+        sm.heartbeat_every_ticks = 1;
+
+        // i64::MAX - 1 + tick_seconds (60) overflows i64::checked_add → None.
+        let _ = sm.tick_at(i64::MAX - 1).await;
+
+        // The heartbeat log must show next_attempt_at_unix=None (overflow path).
+        assert!(
+            logs_contain("next_attempt_at_unix=None"),
+            "heartbeat must log None when checked_add overflows"
+        );
+    }
+
+    // ────────────────────────────────────────────────────────────────────────
+    // load_cached_bundle: sentinel I/O error (non-NotFound)
+    //
+    // When the sentinel path exists but is not readable (e.g. it is a directory
+    // rather than a regular file), tokio::fs::read returns an Err whose kind is
+    // not NotFound, so load_cached_bundle must propagate it as Err(AcmeError).
+    // ────────────────────────────────────────────────────────────────────────
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn load_cached_bundle_err_on_sentinel_io_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let now_unix = time::OffsetDateTime::now_utc().unix_timestamp();
+        let (cert_pem, key_pem) = generate_cert(now_unix + 90 * 86_400, &["a.example.test"]);
+
+        tokio::fs::write(tmp.path().join(CERT_FILE), &cert_pem)
+            .await
+            .unwrap();
+        tokio::fs::write(tmp.path().join(KEY_FILE), &key_pem)
+            .await
+            .unwrap();
+        // Create the sentinel path as a *directory* — reading it returns an I/O
+        // error whose kind is IsADirectory (not NotFound).
+        tokio::fs::create_dir(tmp.path().join(SENTINEL_FILE))
+            .await
+            .unwrap();
+
+        let sm = AcmeStateMachine::new_with_issuer(
+            test_config(tmp.path()),
+            dev_null_sink(),
+            Box::new(MockIssuer::with_results(vec![])),
+        );
+
+        let result = sm.load_cached_bundle().await;
+        assert!(
+            result.is_err(),
+            "non-NotFound sentinel I/O error must propagate as Err"
+        );
+    }
+
+    // ────────────────────────────────────────────────────────────────────────
+    // load_cached_bundle / validate_bundle: key.pem not valid UTF-8
+    // ────────────────────────────────────────────────────────────────────────
+
+    #[traced_test]
+    #[tokio::test]
+    async fn load_cached_bundle_none_when_key_not_utf8() {
+        let tmp = tempfile::tempdir().unwrap();
+        let now_unix = time::OffsetDateTime::now_utc().unix_timestamp();
+        let (cert_pem, _) = generate_cert(now_unix + 90 * 86_400, &["a.example.test"]);
+
+        std::fs::write(tmp.path().join(CERT_FILE), &cert_pem).unwrap();
+        std::fs::write(tmp.path().join(SENTINEL_FILE), sha256_hex(&cert_pem)).unwrap();
+        // Write a key that is not valid UTF-8.
+        std::fs::write(tmp.path().join(KEY_FILE), b"\xff\xff\xff").unwrap();
+
+        let sm = AcmeStateMachine::new_with_issuer(
+            test_config(tmp.path()),
+            dev_null_sink(),
+            Box::new(MockIssuer::with_results(vec![])),
+        );
+
+        let loaded = sm.load_cached_bundle().await.unwrap();
+        assert!(
+            loaded.is_none(),
+            "non-UTF-8 key.pem must cause the bundle to be rejected"
+        );
+        assert!(
+            logs_contain("not valid UTF-8"),
+            "warn log must mention the UTF-8 error"
+        );
+    }
+
+    // ────────────────────────────────────────────────────────────────────────
+    // load_cached_bundle / validate_bundle: key.pem parse failed
+    // ────────────────────────────────────────────────────────────────────────
+
+    #[traced_test]
+    #[tokio::test]
+    async fn load_cached_bundle_none_when_key_parse_fails() {
+        let tmp = tempfile::tempdir().unwrap();
+        let now_unix = time::OffsetDateTime::now_utc().unix_timestamp();
+        let (cert_pem, _) = generate_cert(now_unix + 90 * 86_400, &["a.example.test"]);
+
+        std::fs::write(tmp.path().join(CERT_FILE), &cert_pem).unwrap();
+        std::fs::write(tmp.path().join(SENTINEL_FILE), sha256_hex(&cert_pem)).unwrap();
+        // Valid UTF-8 but not valid PEM — rcgen::KeyPair::from_pem will fail.
+        std::fs::write(tmp.path().join(KEY_FILE), b"not a valid pem key").unwrap();
+
+        let sm = AcmeStateMachine::new_with_issuer(
+            test_config(tmp.path()),
+            dev_null_sink(),
+            Box::new(MockIssuer::with_results(vec![])),
+        );
+
+        let loaded = sm.load_cached_bundle().await.unwrap();
+        assert!(
+            loaded.is_none(),
+            "invalid PEM key must cause the bundle to be rejected"
+        );
+        assert!(
+            logs_contain("key.pem parse failed"),
+            "warn log must mention the parse failure"
+        );
+    }
 }
