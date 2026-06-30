@@ -43,3 +43,6 @@ idna = "1.1.0"
 [dev-dependencies]
 mockall = "0.13"
 tracing-test = "0.2"
+tokio-rustls = "0.26"
+hyper-util = { version = "0.1", features = ["server-auto", "http1", "tokio"] }
+tokio = { version = "1", features = ["net"] }

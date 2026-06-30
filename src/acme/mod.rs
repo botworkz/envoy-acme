@@ -1,5 +1,7 @@
 //! ACME state machine and supporting sub-modules for certificate issuance and renewal.
 pub mod account;
+#[cfg(test)]
+pub(crate) mod account_test_server;
 pub mod backoff;
 pub(crate) mod client;
 pub mod order;
