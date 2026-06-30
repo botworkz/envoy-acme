@@ -116,6 +116,8 @@ mod tests {
             .times(1)
             .returning(|_, _, _, _| {});
 
+        // `end_of_stream` is ignored by the implementation; passing `false`
+        // here confirms the challenge-hit path is unchanged.
         let status = filter.on_request_headers(&mut envoy, false);
         assert_eq!(
             status,

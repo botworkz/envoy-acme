@@ -1185,6 +1185,8 @@ mod tests {
 
     #[tokio::test]
     async fn force_renew_uses_tick_and_updates_not_after() {
+        const STALE_NOT_AFTER_UNIX: i64 = 1;
+
         let tmp = tempfile::tempdir().unwrap();
         let not_after = time::OffsetDateTime::now_utc().unix_timestamp() + 90 * 86_400;
         let (cert_pem, key_pem) = generate_cert(not_after);
@@ -1204,12 +1206,12 @@ mod tests {
             Box::new(ArcSink(sink.clone())),
             issuer,
         );
-        sm.last_not_after_unix = Some(1);
+        sm.last_not_after_unix = Some(STALE_NOT_AFTER_UNIX);
 
         sm.force_renew().await.unwrap();
 
         assert_eq!(sink.call_count(), 1);
-        assert_ne!(sm.last_not_after_unix, Some(1));
+        assert_ne!(sm.last_not_after_unix, Some(STALE_NOT_AFTER_UNIX));
         assert!(sm.last_not_after_unix.is_some());
     }
 
@@ -1521,6 +1523,8 @@ mod tests {
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn cached_cert_emits_not_after_metric() {
+        // Intentionally hold the global metrics test lock across the async tick
+        // so metric updates remain isolated from other tests.
         let _guard = crate::metrics::test_lock();
         crate::metrics::reset_test_state();
 
