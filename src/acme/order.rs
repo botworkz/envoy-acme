@@ -1,4 +1,11 @@
 //! ACME order submission, HTTP-01 challenge registration, and certificate issuance.
+//!
+//! Challenge tokens are registered with [`challenge_store`] via a `scopeguard`-wrapped
+//! RAII guard inside [`issue_certificate`], so every registered token is removed when
+//! the function returns — whether by a normal `Ok`, an `Err` via `?`, a
+//! `tokio::time::timeout` cancellation, or a future drop/abort.  The TTL eviction
+//! built into `ChallengeStore` remains as defence-in-depth but is no longer the
+//! primary cleanup mechanism.
 use instant_acme::{
     Authorization, AuthorizationStatus, Challenge, ChallengeType, Identifier, NewOrder, OrderStatus,
 };
@@ -130,7 +137,17 @@ pub async fn issue_certificate(
         })
         .await?;
 
-    let mut challenge_tokens = Vec::new();
+    // RAII guard: every token pushed via `guard.push(...)` is removed from
+    // `ChallengeStore` when the guard drops, regardless of how this function
+    // exits — normal `Ok`, `?`-propagation, `tokio::time::timeout` cancellation,
+    // or future drop/abort.  The TTL eviction in `ChallengeStore` remains as
+    // defence-in-depth but is no longer the primary cleanup mechanism.
+    let mut guard = scopeguard::guard(Vec::<String>::new(), |tokens| {
+        for token in &tokens {
+            challenge_store::remove(token);
+        }
+    });
+
     let authorizations = order.authorizations().await?;
 
     for authz in &authorizations {
@@ -139,7 +156,7 @@ pub async fn issue_certificate(
             AuthorizationAction::Register { challenge } => {
                 let key_auth = order.key_authorization(challenge);
                 challenge_store::insert(challenge.token.clone(), key_auth);
-                challenge_tokens.push(challenge.token.clone());
+                guard.push(challenge.token.clone());
                 order.set_challenge_ready(&challenge.url).await?;
             }
         }
@@ -159,9 +176,6 @@ pub async fn issue_certificate(
     }
 
     if !ready {
-        for token in &challenge_tokens {
-            challenge_store::remove(token);
-        }
         return Err(AcmeError::OrderFailed(
             "timed out waiting for ready authorization".to_string(),
         ));
@@ -177,10 +191,6 @@ pub async fn issue_certificate(
             break;
         }
         sleep(POLL_INTERVAL).await;
-    }
-
-    for token in &challenge_tokens {
-        challenge_store::remove(token);
     }
 
     assemble_bundle(cert_chain, key_pair)
@@ -236,6 +246,19 @@ mod tests {
                 "token": token,
                 "status": "pending"
             }]
+        });
+        serde_json::from_value(raw).expect("fixture must deserialise")
+    }
+
+    /// Build a single `Pending` HTTP-01 authorization with an explicit token
+    /// string.  Use distinct tokens across tests to avoid cross-test
+    /// interference with the process-global `ChallengeStore`.
+    fn make_pending_authz(token: &str) -> Authorization {
+        let raw = serde_json::json!({
+            "status": "pending",
+            "expires": "2099-01-01T00:00:00Z",
+            "identifier": {"type": "dns", "value": "example.test"},
+            "challenges": [{"type": "http-01", "url": "https://acme.test/chal/0", "token": token, "status": "pending"}]
         });
         serde_json::from_value(raw).expect("fixture must deserialise")
     }
@@ -432,10 +455,17 @@ mod tests {
 
     struct MockAcmeOrder {
         authorizations_response: Option<Result<Vec<Authorization>, instant_acme::Error>>,
+        /// `set_challenge_ready` returns this result (taken once) and then `Ok(())`.
+        set_challenge_ready_result: Option<Result<(), instant_acme::Error>>,
+        /// If non-zero, `set_challenge_ready` sleeps for this many milliseconds
+        /// before returning (simulating a slow CA for cancellation tests).
+        set_challenge_ready_delay_ms: u64,
         refresh_statuses: VecDeque<OrderStatus>,
         refresh_state: OrderState,
         finalize_response: Option<Result<(), instant_acme::Error>>,
         certificate_responses: VecDeque<Result<Option<String>, instant_acme::Error>>,
+        /// The string returned by `key_authorization`.  Tests that care override
+        /// via `.with_key_auth(...)`; tests that don't get the default.
         key_auth_stash: String,
     }
 
@@ -443,6 +473,8 @@ mod tests {
         fn with_statuses(statuses: Vec<OrderStatus>) -> Self {
             Self {
                 authorizations_response: Some(Ok(vec![make_authz("valid", "example.test", &[])])),
+                set_challenge_ready_result: None,
+                set_challenge_ready_delay_ms: 0,
                 refresh_statuses: statuses.into(),
                 refresh_state: OrderState {
                     status: OrderStatus::Pending,
@@ -476,7 +508,10 @@ mod tests {
         }
 
         async fn set_challenge_ready(&mut self, _url: &str) -> Result<(), instant_acme::Error> {
-            Ok(())
+            if self.set_challenge_ready_delay_ms > 0 {
+                sleep(Duration::from_millis(self.set_challenge_ready_delay_ms)).await;
+            }
+            self.set_challenge_ready_result.take().unwrap_or(Ok(()))
         }
 
         async fn refresh(&mut self) -> Result<&OrderState, instant_acme::Error> {
@@ -678,5 +713,121 @@ mod tests {
             .await
             .expect("should succeed on second certificate poll");
         assert_eq!(bundle.cert_pem, b"CERT-CHAIN".to_vec());
+    }
+
+    // ── RAII cleanup tests ────────────────────────────────────────────────
+    //
+    // These four tests verify that every HTTP-01 challenge token registered by
+    // `issue_certificate` is removed from `ChallengeStore` regardless of how
+    // the function exits: normal `Ok`, `?`-propagation of an `Err`, future
+    // abort/drop, and `tokio::time::timeout` cancellation.
+
+    /// A delay much longer than any test timeout, used to simulate a mock that
+    /// blocks indefinitely (e.g. a slow CA) so that abort/timeout tests can
+    /// fire before the mock resolves.
+    const MOCK_LONG_DELAY_MS: u64 = 5_000;
+
+    /// Happy-path issuance: all authorizations are already Valid so no tokens
+    /// are registered, and the scope guard must leave the store empty.
+    #[tokio::test]
+    async fn cleanup_on_ok_return() {
+        let account = MockAcmeAccount {
+            new_order_result: Mutex::new(Some(Ok(Box::new(MockAcmeOrder::with_statuses(vec![
+                OrderStatus::Ready,
+            ]))))),
+        };
+        issue_certificate(&make_config(), &account)
+            .await
+            .expect("should succeed");
+        assert!(
+            challenge_store::lookup("token-0").is_none(),
+            "no tokens should remain in the store after a successful return"
+        );
+    }
+
+    /// `set_challenge_ready` returns `Err` after the token has already been
+    /// inserted into the store.  The `?` propagation must drop the scope guard,
+    /// which removes the token.
+    #[tokio::test]
+    async fn cleanup_on_err_return() {
+        const TOKEN: &str = "tok-err-return";
+        let mut order = MockAcmeOrder::with_statuses(vec![]);
+        order.authorizations_response = Some(Ok(vec![make_pending_authz(TOKEN)]));
+        order.set_challenge_ready_result =
+            Some(Err(instant_acme::Error::Str("set-challenge-error")));
+        let account = MockAcmeAccount {
+            new_order_result: Mutex::new(Some(Ok(Box::new(order)))),
+        };
+        let _ = issue_certificate(&make_config(), &account).await;
+        assert!(
+            challenge_store::lookup(TOKEN).is_none(),
+            "token '{TOKEN}' must be removed after Err propagation via ?"
+        );
+    }
+
+    /// The `issue_certificate` future is aborted mid-flight (while blocked in
+    /// `set_challenge_ready`).  The scope guard must run during the drop and
+    /// remove the token.
+    #[tokio::test]
+    async fn cleanup_on_future_drop() {
+        const TOKEN: &str = "tok-future-drop";
+        let mut order = MockAcmeOrder::with_statuses(vec![]);
+        order.authorizations_response = Some(Ok(vec![make_pending_authz(TOKEN)]));
+        // Block long enough for the token to be inserted, then sleep until aborted.
+        order.set_challenge_ready_delay_ms = MOCK_LONG_DELAY_MS;
+        let account = std::sync::Arc::new(MockAcmeAccount {
+            new_order_result: Mutex::new(Some(Ok(Box::new(order)))),
+        });
+        let config = std::sync::Arc::new(make_config());
+        let handle = tokio::spawn({
+            let account = account.clone();
+            let config = config.clone();
+            async move { issue_certificate(&config, account.as_ref()).await }
+        });
+        // Give the spawned future time to reach (and enter) set_challenge_ready.
+        sleep(Duration::from_millis(50)).await;
+        // The token must be in the store before the abort.
+        assert!(
+            challenge_store::lookup(TOKEN).is_some(),
+            "token '{TOKEN}' should be in the store before abort"
+        );
+        handle.abort();
+        // Give the runtime time to drop the task and run the scope guard.
+        sleep(Duration::from_millis(50)).await;
+        assert!(
+            challenge_store::lookup(TOKEN).is_none(),
+            "token '{TOKEN}' must be removed after future abort"
+        );
+    }
+
+    /// `tokio::time::timeout` cancels `issue_certificate` while it is blocked
+    /// in `set_challenge_ready`.  The scope guard must fire during the drop and
+    /// remove the token.
+    #[tokio::test]
+    async fn cleanup_on_timeout_cancellation() {
+        const TOKEN: &str = "tok-timeout";
+        let mut order = MockAcmeOrder::with_statuses(vec![]);
+        order.authorizations_response = Some(Ok(vec![make_pending_authz(TOKEN)]));
+        // Sleep well beyond the 5 ms timeout so the outer timeout fires first.
+        order.set_challenge_ready_delay_ms = MOCK_LONG_DELAY_MS;
+        let account = MockAcmeAccount {
+            new_order_result: Mutex::new(Some(Ok(Box::new(order)))),
+        };
+        let config = make_config();
+        let result = tokio::time::timeout(
+            Duration::from_millis(5),
+            issue_certificate(&config, &account),
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "timeout must have fired (expected Elapsed)"
+        );
+        // The drop of the cancelled future runs synchronously as part of the
+        // Timeout future's drop when .await returns; no additional sleep needed.
+        assert!(
+            challenge_store::lookup(TOKEN).is_none(),
+            "token '{TOKEN}' must be removed after timeout cancellation"
+        );
     }
 }
