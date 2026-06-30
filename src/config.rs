@@ -1,5 +1,4 @@
 //! Configuration types for envoy-acme, parsed from JSON or YAML bytes at bootstrap.
-use idna::Config as IdnaConfig;
 use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -190,13 +189,11 @@ impl TryFrom<RawAcmeConfig> for AcmeConfig {
         // (e.g. `xn--mnchen-3ya.example`); we normalise to A-labels at the
         // config boundary so every downstream path (CSR SANs, SAN-coverage
         // checks, HTTP-01 host comparisons) sees the wire form the CA uses.
-        let idna = idna_config();
-
         let normalised_domains: Vec<String> = raw
             .domains
             .iter()
             .enumerate()
-            .map(|(i, value)| normalise_domain(&idna, i, value))
+            .map(|(i, value)| normalise_domain(i, value))
             .collect::<Result<Vec<_>, _>>()?;
 
         if raw.contact.trim().is_empty() {
@@ -359,25 +356,13 @@ fn default_log_level() -> String {
     "info".to_string()
 }
 
-/// Returns the IDNA processing configuration used for domain normalisation.
-///
-/// Settings: UTS#46 nontransitional, STD3 ASCII rules enabled, DNS length
-/// verification enabled.  This matches the CA/Browser Forum Baseline
-/// Requirements profile implemented by Let's Encrypt and other modern CAs.
-fn idna_config() -> IdnaConfig {
-    IdnaConfig::default()
-        .use_std3_ascii_rules(true)
-        .transitional_processing(false)
-        .verify_dns_length(true)
-}
-
 /// Normalise a single domain entry to its IDNA A-label form.
 ///
 /// Fast-fails on structural issues (empty, wildcard, leading-dot, whitespace)
-/// before delegating the heavy lifting to `idna::Config::to_ascii`, which
+/// before delegating the heavy lifting to `idna::uts46::Uts46::to_ascii`, which
 /// handles both U-label→A-label conversion and A-label round-trip validation.
 /// The function is idempotent on already-A-label input.
-fn normalise_domain(idna: &IdnaConfig, i: usize, value: &str) -> Result<String, String> {
+fn normalise_domain(i: usize, value: &str) -> Result<String, String> {
     let reason = if value.is_empty() {
         Some("must be non-empty")
     } else if value.starts_with("*.") {
@@ -397,14 +382,26 @@ fn normalise_domain(idna: &IdnaConfig, i: usize, value: &str) -> Result<String, 
 
     // The bulk of the work: U-label or A-label or plain ASCII → A-label.
     // to_ascii is idempotent on already-A-label input.
-    // IdnaConfig is Copy so dereferencing here copies the small config struct.
-    (*idna).to_ascii(value).map_err(|e| {
-        format!(
-            "acme.domains[{i}]: invalid domain {value:?}: \
-             IDNA normalisation failed ({e:?}); expected an RFC 1035 / 5890 \
-             domain (U-labels accepted, will be normalised to Punycode A-labels)"
+    // Parameters match the CA/Browser Forum Baseline Requirements profile:
+    //   AsciiDenyList::STD3  — rejects underscores and other STD3-invalid chars
+    //   Hyphens::Allow       — no hyphen-position check (matches original behaviour)
+    //   DnsLength::Verify    — per-label ≤63, total ≤253 octets
+    // Transitional processing is always off in idna 1.x.
+    idna::uts46::Uts46::new()
+        .to_ascii(
+            value.as_bytes(),
+            idna::AsciiDenyList::STD3,
+            idna::uts46::Hyphens::Allow,
+            idna::uts46::DnsLength::Verify,
         )
-    })
+        .map(|cow| cow.into_owned())
+        .map_err(|e| {
+            format!(
+                "acme.domains[{i}]: invalid domain {value:?}: \
+                 IDNA normalisation failed ({e:?}); expected an RFC 1035 / 5890 \
+                 domain (U-labels accepted, will be normalised to Punycode A-labels)"
+            )
+        })
 }
 
 impl Config {
