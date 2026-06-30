@@ -11,26 +11,31 @@ WORKDIR /src
 COPY . .
 RUN cargo build --release --target=x86_64-unknown-linux-gnu
 
-# Self-signed placeholder so Envoy's `path_config_source` resolves at
-# startup. FilesystemSink overwrites these atomically on first ACME
-# success; Envoy's file watcher reloads the new material in place.
+# Self-signed placeholders so Envoy's `path_config_source` resolves at
+# startup for both the production bootstrap (example.test) and the
+# integration-test bootstrap (a.example.test / b.example.test).
+# FilesystemSink overwrites these atomically on first ACME success;
+# Envoy's file watcher reloads the new material in place.
 RUN mkdir -p /sds-placeholder \
- && openssl req -x509 -newkey rsa:2048 -nodes \
-      -keyout /sds-placeholder/example.test.key.pem \
-      -out    /sds-placeholder/example.test.cert.pem \
-      -days 1 -subj '/CN=example.test' \
-      -addext 'subjectAltName=DNS:example.test' \
- && chmod 0644 /sds-placeholder/example.test.key.pem \
- && printf '%s\n' \
-      'resources:' \
-      '  - "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.Secret' \
-      '    name: example_test_tls' \
-      '    tls_certificate:' \
-      '      certificate_chain:' \
-      '        filename: /var/lib/envoy-acme/certs/example.test.cert.pem' \
-      '      private_key:' \
-      '        filename: /var/lib/envoy-acme/certs/example.test.key.pem' \
-      > /sds-placeholder/example.test.secret.yaml
+ && for NAME in example.test a.example.test b.example.test; do \
+      openssl req -x509 -newkey rsa:2048 -nodes \
+        -keyout /sds-placeholder/${NAME}.key.pem \
+        -out    /sds-placeholder/${NAME}.cert.pem \
+        -days 1 -subj "/CN=${NAME}" \
+        -addext "subjectAltName=DNS:${NAME}" \
+      && chmod 0644 /sds-placeholder/${NAME}.key.pem \
+      && RES_NAME="$(echo "${NAME}" | tr '.-' '__')_tls" \
+      && printf '%s\n' \
+           'resources:' \
+           '  - "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.Secret' \
+           "    name: ${RES_NAME}" \
+           '    tls_certificate:' \
+           '      certificate_chain:' \
+           "        filename: /var/lib/envoy-acme/certs/${NAME}.cert.pem" \
+           '      private_key:' \
+           "        filename: /var/lib/envoy-acme/certs/${NAME}.key.pem" \
+         > /sds-placeholder/${NAME}.secret.yaml ; \
+    done
 
 FROM envoyproxy/envoy:v1.38-latest
 # ENVOY_UID is intentionally not used in the chown below; it exists as an
