@@ -170,6 +170,7 @@ mod tests {
     use super::*;
     use envoy_proxy_dynamic_modules_rust_sdk::{http::MockEnvoyHttpFilter, EnvoyBuffer};
     use mockall::predicate::eq;
+    use tracing_test::traced_test;
 
     fn make_filter(domains: &[&str]) -> AcmeHttpFilter {
         AcmeHttpFilter {
@@ -208,6 +209,18 @@ mod tests {
     fn normalize_host_ipv6_strips_port() {
         assert_eq!(normalize_host(b"[::1]:8080"), "[::1]");
         assert_eq!(normalize_host(b"[::1]"), "[::1]");
+    }
+
+    #[test]
+    fn normalize_host_ipv6_strips_large_port() {
+        // Port with more than 4 digits — still all digits, so must be stripped.
+        assert_eq!(normalize_host(b"[::1]:54321"), "[::1]");
+    }
+
+    #[test]
+    fn normalize_host_ipv6_non_digit_after_bracket_returns_unchanged() {
+        // After ']' comes ':port' where port is not all digits — leave unchanged.
+        assert_eq!(normalize_host(b"[::1]:port"), "[::1]:port");
     }
 
     #[test]
@@ -466,10 +479,15 @@ mod tests {
         assert!(cfg.domains.is_empty());
     }
 
+    #[traced_test]
     #[test]
     fn from_bytes_invalid_input_yields_empty_domain_set() {
         let cfg = AcmeHttpFilterConfig::from_bytes(b"}{not valid json or yaml at all}{");
         assert!(cfg.domains.is_empty());
+        assert!(
+            logs_contain("failed to parse filter config"),
+            "expected an error log about the parse failure"
+        );
     }
 
     #[test]

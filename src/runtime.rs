@@ -89,6 +89,10 @@ impl RuntimeBridge {
             let runtime = match Builder::new_current_thread().enable_all().build() {
                 Ok(rt) => rt,
                 Err(e) => {
+                    // Tokio's Builder::build on a current_thread runtime with enable_all is
+                    // contractually allowed to return Err but in practice only does so under
+                    // fault-injection scenarios that cannot be reproduced from a unit test.
+                    // The integration job exercises the happy path; this Err arm is defensive.
                     envoy_proxy_dynamic_modules_rust_sdk::envoy_log_error!(
                         "envoy-acme: failed to create tokio runtime: {e}"
                     );
@@ -147,6 +151,11 @@ impl RuntimeBridge {
 
             if let Err(panic) = result {
                 let msg = panic_message(panic.as_ref());
+                // This log fires on the runtime thread, which has no traced_test subscriber
+                // installed (tracing-test uses thread-local subscribers). The panic path is
+                // exercised by `runtime_alive_false_after_panic` which asserts the visible
+                // effect (`!is_alive()` after panic_for_test), but the log line itself is
+                // not asserted in unit tests.
                 envoy_proxy_dynamic_modules_rust_sdk::envoy_log_error!(
                     "envoy-acme: runtime thread panicked: {msg}"
                 );

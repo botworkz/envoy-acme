@@ -153,6 +153,9 @@ impl TryFrom<RawAcmeConfig> for AcmeConfig {
                     Some(DirectoryProfile::Staging) => "staging",
                     Some(DirectoryProfile::Production) => "production",
                     None => "unset (no directory_profile)",
+                    // Unreachable: the `"http" if raw.directory_profile == Some(Custom)` arm above
+                    // handles the Custom case; by the time we reach this `match` arm, profile is
+                    // guaranteed not to be Custom.
                     Some(DirectoryProfile::Custom) => unreachable!(),
                 };
                 return Err(format!(
@@ -878,6 +881,18 @@ acme:
         assert!(val.get("tick_seconds").is_some());
         assert!(val.get("issuance_timeout_seconds").is_some());
         assert!(val.get("directory_ca_file").is_some()); // serializes as null when None
+    }
+
+    #[test]
+    fn serialize_directory_ca_file_some_emits_path() {
+        let mut cfg = make_acme_config(None, "https://acme.example.invalid/directory");
+        cfg.directory_ca_file = Some(std::path::PathBuf::from("/tmp/ca.pem"));
+        let val = serde_json::to_value(&cfg).expect("serialize");
+        assert_eq!(
+            val["directory_ca_file"],
+            serde_json::json!("/tmp/ca.pem"),
+            "directory_ca_file Some(_) must serialize as a non-null path string"
+        );
     }
 
     // ── Config::from_bytes JSON path ──────────────────────────────────────────
