@@ -77,3 +77,37 @@ certificate when contacting the ACME directory, and by the host `curl` invocatio
 in the integration test to verify the issued certificate.
 
 See `config/pebble-certs/NOTICE` for provenance and licensing details.
+
+## Integration test topology
+
+The CI `integration` job validates a real end-to-end certificate issuance flow:
+
+```text
+ ┌──────────────────────────────────────────────────────────┐
+ │  Docker Compose network                                   │
+ │                                                           │
+ │  ┌──────────┐  HTTP-01 validation   ┌────────────────┐  │
+ │  │  pebble  │ ─────────────────────▶│     envoy      │  │
+ │  │  :14000  │                       │  :80 (HTTP)    │  │
+ │  └──────────┘                       │  :443 (HTTPS)  │  │
+ │       │ DNS query                   └────────────────┘  │
+ │       ▼                                      │           │
+ │  ┌────────────────┐                          ▼           │
+ │  │ challtestsrv   │              ┌───────────────────┐  │
+ │  │ :8053 (DNS)    │              │     upstream      │  │
+ │  │ :8055 (mgmt)   │              │  hashicorp/http-  │  │
+ │  └────────────────┘              │  echo ":8080"     │  │
+ │                                  └───────────────────┘  │
+ └──────────────────────────────────────────────────────────┘
+```
+
+What the integration job verifies:
+1. Envoy starts with the dynamic module loaded.
+2. The module contacts Pebble and completes HTTP-01 challenge validation for **both** configured domains via the in-process HTTP filter.
+3. `FilesystemSink` writes `a.example.test.cert.pem`, `a.example.test.key.pem`, and the Envoy SDS secret file `a.example.test.secret.yaml` (first domain as canonical filename prefix).
+4. The issued cert contains SANs for **both** `a.example.test` and `b.example.test`.
+5. Envoy's HTTPS listener warms up using the SDS secret file and serves traffic.
+6. `curl --cacert pebble.minica.pem https://a.example.test:8443/` and `https://b.example.test:8443/` both return HTTP 200.
+7. The certificate presented on each SNI name has SANs `[a.example.test, b.example.test]` and chains to Pebble's CA.
+
+`challtestsrv` acts as a programmable DNS server: the CI step registers both `a.example.test` and `b.example.test` to the envoy container's IP via its management API on `:8055` before triggering issuance, so Pebble can perform real HTTP-01 validation for each name against Envoy.
