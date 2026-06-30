@@ -58,6 +58,12 @@ struct RawAcmeConfig {
     /// renewal.  Defaults to 60.  Set lower in integration environments.
     #[serde(default = "default_tick_seconds")]
     tick_seconds: u64,
+    /// Wall-clock budget for a single issuance attempt (HTTPS calls to the
+    /// ACME directory included).  If the attempt does not complete within this
+    /// many seconds the tick returns `AcmeError::Timeout` and the next tick
+    /// gets a fresh attempt.  Defaults to 120.  Must be in [5, 600].
+    #[serde(default = "default_issuance_timeout_seconds")]
+    issuance_timeout_seconds: u64,
 }
 
 impl TryFrom<RawAcmeConfig> for AcmeConfig {
@@ -159,6 +165,13 @@ impl TryFrom<RawAcmeConfig> for AcmeConfig {
             return Err("acme.tick_seconds must be >= 1 (got 0)".to_string());
         }
 
+        if !(5..=600).contains(&raw.issuance_timeout_seconds) {
+            return Err(format!(
+                "acme.issuance_timeout_seconds must be between 5 and 600 (got {})",
+                raw.issuance_timeout_seconds
+            ));
+        }
+
         if raw.domains.is_empty() {
             return Err("acme.domains must contain at least one domain".to_string());
         }
@@ -217,6 +230,7 @@ impl TryFrom<RawAcmeConfig> for AcmeConfig {
             state_dir: raw.state_dir,
             cert_sink: raw.cert_sink,
             tick_seconds: raw.tick_seconds,
+            issuance_timeout_seconds: raw.issuance_timeout_seconds,
         })
     }
 }
@@ -246,6 +260,12 @@ pub struct AcmeConfig {
     /// renewal.  Defaults to 60.  Set lower in integration environments.
     #[serde(default = "default_tick_seconds")]
     pub tick_seconds: u64,
+    /// Wall-clock budget for a single issuance attempt.  If the attempt does
+    /// not complete within this many seconds the tick returns
+    /// `AcmeError::Timeout` and the next tick gets a fresh attempt.
+    /// Defaults to 120.  Must be in [5, 600].
+    #[serde(default = "default_issuance_timeout_seconds")]
+    pub issuance_timeout_seconds: u64,
 }
 
 impl Serialize for AcmeConfig {
@@ -253,7 +273,7 @@ impl Serialize for AcmeConfig {
     where
         S: serde::Serializer,
     {
-        let mut state = serializer.serialize_struct("AcmeConfig", 9)?;
+        let mut state = serializer.serialize_struct("AcmeConfig", 10)?;
         if let Some(profile) = self.directory_profile {
             let profile = match profile {
                 DirectoryProfile::Staging => "staging",
@@ -275,6 +295,7 @@ impl Serialize for AcmeConfig {
         state.serialize_field("state_dir", &self.state_dir)?;
         state.serialize_field("cert_sink", &self.cert_sink)?;
         state.serialize_field("tick_seconds", &self.tick_seconds)?;
+        state.serialize_field("issuance_timeout_seconds", &self.issuance_timeout_seconds)?;
         state.end()
     }
 }
@@ -315,6 +336,10 @@ fn default_renewal_window_days() -> u64 {
 
 fn default_tick_seconds() -> u64 {
     60
+}
+
+fn default_issuance_timeout_seconds() -> u64 {
+    120
 }
 
 fn default_log_level() -> String {
@@ -698,5 +723,51 @@ acme:
             msg.contains("https") || msg.contains("ftp"),
             "error should mention https or the bad scheme, got: {msg}"
         );
+    }
+
+    // ── issuance_timeout_seconds validation ──────────────────────────────────
+
+    #[test]
+    fn issuance_timeout_defaults_to_120() {
+        let raw = base_yaml("directory_uri: https://example.invalid/directory");
+        let cfg = Config::from_bytes(raw.as_bytes()).expect("yaml parse");
+        assert_eq!(cfg.acme.issuance_timeout_seconds, 120);
+    }
+
+    #[test]
+    fn issuance_timeout_zero_rejected() {
+        let raw = base_yaml(
+            "directory_uri: https://example.invalid/directory\n  issuance_timeout_seconds: 0",
+        );
+        let err =
+            Config::from_bytes(raw.as_bytes()).expect_err("issuance_timeout_seconds=0 should fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("issuance_timeout_seconds") && msg.contains("between 5 and 600"),
+            "error should mention issuance_timeout_seconds range, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn issuance_timeout_too_large_rejected() {
+        let raw = base_yaml(
+            "directory_uri: https://example.invalid/directory\n  issuance_timeout_seconds: 601",
+        );
+        let err = Config::from_bytes(raw.as_bytes())
+            .expect_err("issuance_timeout_seconds=601 should fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("issuance_timeout_seconds") && msg.contains("between 5 and 600"),
+            "error should mention issuance_timeout_seconds range, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn issuance_timeout_valid_value_accepted() {
+        let raw = base_yaml(
+            "directory_uri: https://example.invalid/directory\n  issuance_timeout_seconds: 300",
+        );
+        let cfg = Config::from_bytes(raw.as_bytes()).expect("yaml parse");
+        assert_eq!(cfg.acme.issuance_timeout_seconds, 300);
     }
 }
