@@ -156,6 +156,10 @@ impl TryFrom<RawAcmeConfig> for AcmeConfig {
             }
             "http" => {
                 let profile = match raw.directory_profile {
+                    // Unreachable by contract: the staging and production profiles always
+                    // resolve `directory_uri` to an `https://` URL (the profile-to-URL
+                    // assignments above), so neither can reach this `"http"` arm.  Arms
+                    // retained for match-exhaustiveness (bucket 2).
                     Some(DirectoryProfile::Staging) => "staging",
                     Some(DirectoryProfile::Production) => "production",
                     None => "unset (no directory_profile)",

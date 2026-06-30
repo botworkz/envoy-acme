@@ -101,6 +101,10 @@ impl<EHF: EnvoyHttpFilter> HttpFilter<EHF> for AcmeHttpFilter {
         };
         let host = normalize_host(authority.as_slice());
         if !self.domains.contains(&host) {
+            // tracing::debug! macro-internal lines (105–106) are not separately
+            // instrumented by tarpaulin without an active subscriber (bucket 4:
+            // macro-expansion blind); the path is exercised by
+            // `continue_when_host_not_in_domains`.
             tracing::debug!(
                 host = %host,
                 "acme: host not in configured domains, falling through"
@@ -109,6 +113,9 @@ impl<EHF: EnvoyHttpFilter> HttpFilter<EHF> for AcmeHttpFilter {
         }
 
         if let Some(key_authorization) = challenge_store::lookup(token) {
+            // Constant-expression argument lines inside send_response are not
+            // individually instrumented by tarpaulin (bucket 4: instrumentation
+            // artifact); the call is exercised by `respond_200_on_challenge_hit`.
             envoy.send_response(
                 200,
                 &[("content-type", CONTENT_TYPE)],
@@ -118,6 +125,9 @@ impl<EHF: EnvoyHttpFilter> HttpFilter<EHF> for AcmeHttpFilter {
             return abi::envoy_dynamic_module_type_on_http_filter_request_headers_status::StopIteration;
         }
 
+        // Constant-expression argument lines inside send_response are not
+        // individually instrumented by tarpaulin (bucket 4: instrumentation
+        // artifact); the call is exercised by `respond_404_on_challenge_miss`.
         envoy.send_response(
             404,
             &[("content-type", CONTENT_TYPE)],
@@ -528,6 +538,7 @@ mod tests {
         );
     }
 
+    #[traced_test]
     #[test]
     fn continue_when_host_not_in_domains() {
         let mut filter = make_filter(&["allowed.test"]);
