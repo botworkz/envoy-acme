@@ -276,6 +276,7 @@ pub(crate) fn test_lock() -> std::sync::MutexGuard<'static, ()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use envoy_proxy_dynamic_modules_rust_sdk::abi::envoy_dynamic_module_type_metrics_result;
     use envoy_proxy_dynamic_modules_rust_sdk::bootstrap::{
         MockEnvoyBootstrapExtensionConfig, MockEnvoyBootstrapExtensionConfigScheduler,
     };
@@ -283,13 +284,15 @@ mod tests {
         EnvoyCounterVecId, EnvoyGaugeVecId, EnvoyHistogramId,
     };
 
-    #[test]
-    fn registers_expected_metrics() {
-        let _guard = test_lock();
-        reset_test_state();
-
+    /// Build the standard init mock: registers all five metrics and wraps
+    /// `scheduler` inside `new_scheduler`. `commit_times` is how many times
+    /// `scheduler.commit` should be called (one per `enqueue_many` invocation).
+    fn make_init_mock(commit_times: usize) -> MockEnvoyBootstrapExtensionConfig {
         let mut scheduler = MockEnvoyBootstrapExtensionConfigScheduler::new();
-        scheduler.expect_commit().times(0);
+        scheduler
+            .expect_commit()
+            .times(commit_times)
+            .returning(|_| ());
 
         let mut envoy_config = MockEnvoyBootstrapExtensionConfig::new();
         envoy_config
@@ -300,7 +303,9 @@ mod tests {
         envoy_config
             .expect_define_gauge_vec()
             .once()
-            .withf(|name, labels| name == "envoy_acme_consecutive_failures" && labels == ["domain"])
+            .withf(|name, labels| {
+                name == "envoy_acme_consecutive_failures" && labels == ["domain"]
+            })
             .return_once(|_, _| Ok(EnvoyGaugeVecId(2)));
         envoy_config
             .expect_define_gauge_vec()
@@ -325,8 +330,213 @@ mod tests {
             .expect_new_scheduler()
             .once()
             .return_once(move || Box::new(scheduler));
+        envoy_config
+    }
 
+    #[test]
+    fn registers_expected_metrics() {
+        let _guard = test_lock();
+        reset_test_state();
+        let mut envoy_config = make_init_mock(0);
         init(&mut envoy_config).unwrap();
+    }
+
+    // ── apply_update dispatch ─────────────────────────────────────────────────
+
+    #[test]
+    fn apply_update_issuance_success() {
+        let _guard = test_lock();
+        reset_test_state();
+
+        // commit is called once (enqueue_many batches both updates in one call)
+        let mut init_cfg = make_init_mock(1);
+        init(&mut init_cfg).unwrap();
+
+        record_issuance_success("d.example", Duration::from_secs(2));
+
+        let mut cfg2 = MockEnvoyBootstrapExtensionConfig::new();
+        cfg2.expect_increment_counter_vec()
+            .once()
+            .withf(|id, labels, inc| {
+                *id == EnvoyCounterVecId(1) && *labels == ["success"] && *inc == 1
+            })
+            .returning(|_, _, _| Ok(()));
+        cfg2.expect_record_histogram_value()
+            .once()
+            .withf(|id, val| *id == EnvoyHistogramId(5) && *val == 2)
+            .returning(|_, _| Ok(()));
+
+        on_scheduled(&mut cfg2, METRICS_EVENT_ID);
+    }
+
+    #[test]
+    fn apply_update_issuance_failure() {
+        let _guard = test_lock();
+        reset_test_state();
+
+        let mut init_cfg = make_init_mock(1);
+        init(&mut init_cfg).unwrap();
+
+        record_issuance_failure("d.example", Duration::from_secs(3));
+
+        let mut cfg2 = MockEnvoyBootstrapExtensionConfig::new();
+        cfg2.expect_increment_counter_vec()
+            .once()
+            .withf(|id, labels, inc| {
+                *id == EnvoyCounterVecId(1) && *labels == ["failure"] && *inc == 1
+            })
+            .returning(|_, _, _| Ok(()));
+        cfg2.expect_record_histogram_value()
+            .once()
+            .withf(|id, val| *id == EnvoyHistogramId(5) && *val == 3)
+            .returning(|_, _| Ok(()));
+
+        on_scheduled(&mut cfg2, METRICS_EVENT_ID);
+    }
+
+    #[test]
+    fn apply_update_consecutive_failures() {
+        let _guard = test_lock();
+        reset_test_state();
+
+        let mut init_cfg = make_init_mock(1);
+        init(&mut init_cfg).unwrap();
+
+        set_consecutive_failures("d.example", 7);
+
+        let mut cfg2 = MockEnvoyBootstrapExtensionConfig::new();
+        cfg2.expect_set_gauge_vec()
+            .once()
+            .withf(|id, labels, val| {
+                *id == EnvoyGaugeVecId(2) && *labels == ["d.example"] && *val == 7
+            })
+            .returning(|_, _, _| Ok(()));
+
+        on_scheduled(&mut cfg2, METRICS_EVENT_ID);
+    }
+
+    #[test]
+    fn apply_update_next_retry_at() {
+        let _guard = test_lock();
+        reset_test_state();
+
+        let mut init_cfg = make_init_mock(1);
+        init(&mut init_cfg).unwrap();
+
+        set_next_retry_at("d.example", 1_700_000_000);
+
+        let mut cfg2 = MockEnvoyBootstrapExtensionConfig::new();
+        cfg2.expect_set_gauge_vec()
+            .once()
+            .withf(|id, labels, val| {
+                *id == EnvoyGaugeVecId(3) && *labels == ["d.example"] && *val == 1_700_000_000
+            })
+            .returning(|_, _, _| Ok(()));
+
+        on_scheduled(&mut cfg2, METRICS_EVENT_ID);
+    }
+
+    #[test]
+    fn apply_update_cert_not_after() {
+        let _guard = test_lock();
+        reset_test_state();
+
+        let mut init_cfg = make_init_mock(1);
+        init(&mut init_cfg).unwrap();
+
+        set_cert_not_after("d.example", 1_700_000_000);
+
+        let mut cfg2 = MockEnvoyBootstrapExtensionConfig::new();
+        cfg2.expect_set_gauge_vec()
+            .once()
+            .withf(|id, labels, val| {
+                *id == EnvoyGaugeVecId(4) && *labels == ["d.example"] && *val == 1_700_000_000
+            })
+            .returning(|_, _, _| Ok(()));
+
+        on_scheduled(&mut cfg2, METRICS_EVENT_ID);
+    }
+
+    // ── apply_update warn-log path ────────────────────────────────────────────
+
+    #[test]
+    #[tracing_test::traced_test]
+    fn apply_update_metric_error_logs_warning() {
+        let _guard = test_lock();
+        reset_test_state();
+
+        let mut init_cfg = make_init_mock(1);
+        init(&mut init_cfg).unwrap();
+
+        record_issuance_success("d.example", Duration::from_secs(1));
+
+        let mut cfg2 = MockEnvoyBootstrapExtensionConfig::new();
+        cfg2.expect_increment_counter_vec()
+            .once()
+            .returning(|_, _, _| {
+                Err(envoy_dynamic_module_type_metrics_result::MetricNotFound)
+            });
+        cfg2.expect_record_histogram_value()
+            .once()
+            .returning(|_, _| Ok(()));
+
+        on_scheduled(&mut cfg2, METRICS_EVENT_ID);
+
+        assert!(logs_contain("failed to update Envoy metric"));
+    }
+
+    // ── duration_to_seconds ───────────────────────────────────────────────────
+
+    #[test]
+    fn duration_to_seconds_cases() {
+        assert_eq!(duration_to_seconds(Duration::ZERO), 0);
+        assert_eq!(duration_to_seconds(Duration::from_nanos(1)), 1); // rounds up
+        assert_eq!(duration_to_seconds(Duration::from_secs(1)), 1);
+        assert_eq!(duration_to_seconds(Duration::from_millis(1500)), 2); // rounds up
+        assert_eq!(
+            duration_to_seconds(Duration::new(u64::MAX, 0)),
+            u64::MAX
+        ); // exact seconds, no overflow
+        assert_eq!(
+            duration_to_seconds(Duration::new(u64::MAX, 1)),
+            u64::MAX
+        ); // saturating_add saturates
+    }
+
+    // ── on_scheduled wrong event_id ───────────────────────────────────────────
+
+    #[test]
+    fn on_scheduled_wrong_event_id_no_metrics_called() {
+        let _guard = test_lock();
+        reset_test_state();
+
+        let mut init_cfg = make_init_mock(1);
+        init(&mut init_cfg).unwrap();
+
+        set_consecutive_failures("d.example", 1);
+
+        // Second mock has NO expectations — passing any wrong event_id must be
+        // a no-op; if any metric call is made the mock will panic.
+        let mut cfg2 = MockEnvoyBootstrapExtensionConfig::new();
+        on_scheduled(&mut cfg2, 999);
+    }
+
+    // ── enqueue_many early-return when state is None ──────────────────────────
+
+    #[test]
+    fn enqueue_many_early_return_when_no_state() {
+        let _guard = test_lock();
+        reset_test_state(); // metrics_state() == None
+
+        // Should not panic even though there is no metrics state.
+        record_issuance_success("d.example", Duration::from_secs(1));
+
+        // The test-only recorder still captured the updates despite the early
+        // return from enqueue_many.
+        let updates = take_test_updates();
+        assert!(updates
+            .iter()
+            .any(|u| u.contains("envoy_acme_issuance_total")));
     }
 
     #[test]

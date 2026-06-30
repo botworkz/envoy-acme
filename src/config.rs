@@ -770,4 +770,119 @@ acme:
         let cfg = Config::from_bytes(raw.as_bytes()).expect("yaml parse");
         assert_eq!(cfg.acme.issuance_timeout_seconds, 300);
     }
+
+    // ── Serialize for AcmeConfig ──────────────────────────────────────────────
+
+    fn make_acme_config(
+        profile: Option<DirectoryProfile>,
+        uri: &str,
+    ) -> AcmeConfig {
+        AcmeConfig {
+            directory_profile: profile,
+            directory_uri: uri.to_string(),
+            directory_ca_file: None,
+            contact: "mailto:test@example.test".to_string(),
+            domains: vec!["example.test".to_string()],
+            renewal_window_days: 30,
+            state_dir: std::path::PathBuf::from("/tmp/acme"),
+            cert_sink: CertSinkConfig {
+                sink_type: "filesystem".to_string(),
+                cert_dir: std::path::PathBuf::from("/tmp/certs"),
+                layout: Layout::PerDomain,
+            },
+            tick_seconds: 60,
+            issuance_timeout_seconds: 120,
+        }
+    }
+
+    #[test]
+    fn serialize_staging_profile_omits_directory_uri() {
+        let cfg = make_acme_config(Some(DirectoryProfile::Staging), LE_STAGING_URL);
+        let val = serde_json::to_value(&cfg).expect("serialize");
+        assert_eq!(val["directory_profile"], "staging");
+        assert!(
+            val.get("directory_uri").is_none(),
+            "staging must not emit directory_uri"
+        );
+    }
+
+    #[test]
+    fn serialize_production_profile_omits_directory_uri() {
+        let cfg = make_acme_config(Some(DirectoryProfile::Production), LE_PRODUCTION_URL);
+        let val = serde_json::to_value(&cfg).expect("serialize");
+        assert_eq!(val["directory_profile"], "production");
+        assert!(
+            val.get("directory_uri").is_none(),
+            "production must not emit directory_uri"
+        );
+    }
+
+    #[test]
+    fn serialize_custom_profile_emits_directory_uri() {
+        let uri = "https://pebble:14000/dir";
+        let cfg = make_acme_config(Some(DirectoryProfile::Custom), uri);
+        let val = serde_json::to_value(&cfg).expect("serialize");
+        assert_eq!(val["directory_profile"], "custom");
+        assert_eq!(val["directory_uri"], uri);
+    }
+
+    #[test]
+    fn serialize_no_profile_emits_directory_uri() {
+        let uri = "https://acme.example.invalid/directory";
+        let cfg = make_acme_config(None, uri);
+        let val = serde_json::to_value(&cfg).expect("serialize");
+        assert!(
+            val.get("directory_profile").is_none(),
+            "absent profile must not emit directory_profile key"
+        );
+        assert_eq!(val["directory_uri"], uri);
+    }
+
+    #[test]
+    fn serialize_always_emits_common_fields() {
+        let cfg = make_acme_config(None, "https://acme.example.invalid/directory");
+        let val = serde_json::to_value(&cfg).expect("serialize");
+        assert!(val.get("contact").is_some());
+        assert!(val.get("domains").is_some());
+        assert!(val.get("renewal_window_days").is_some());
+        assert!(val.get("state_dir").is_some());
+        assert!(val.get("cert_sink").is_some());
+        assert!(val.get("tick_seconds").is_some());
+        assert!(val.get("issuance_timeout_seconds").is_some());
+        assert!(val.get("directory_ca_file").is_some()); // serializes as null when None
+    }
+
+    // ── Config::from_bytes JSON path ──────────────────────────────────────────
+
+    #[test]
+    fn from_bytes_parses_valid_json() {
+        let json = serde_json::json!({
+            "acme": {
+                "directory_uri": "https://acme.example.invalid/directory",
+                "contact": "mailto:test@example.test",
+                "domains": ["example.test"],
+                "state_dir": "/tmp/acme",
+                "cert_sink": {
+                    "type": "filesystem",
+                    "cert_dir": "/tmp/certs"
+                }
+            }
+        })
+        .to_string();
+
+        let cfg = Config::from_bytes(json.as_bytes()).expect("json parse");
+        assert_eq!(
+            cfg.acme.directory_uri,
+            "https://acme.example.invalid/directory"
+        );
+        assert_eq!(cfg.acme.domains, vec!["example.test".to_string()]);
+    }
+
+    // ── LogConfig::default ────────────────────────────────────────────────────
+
+    #[test]
+    fn log_config_default_level_is_info() {
+        let log = LogConfig::default();
+        assert_eq!(log.level, "info");
+    }
 }
