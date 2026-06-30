@@ -601,6 +601,71 @@ mod tests {
         }
     }
 
+    #[test]
+    fn inspect_state_returns_invalid_when_key_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let now_unix = time::OffsetDateTime::now_utc().unix_timestamp();
+        let (cert_pem, _) = generate_cert(now_unix + 90 * 86_400);
+        std::fs::write(tmp.path().join("cert.pem"), cert_pem).unwrap();
+
+        let summary = inspect_state(tmp.path(), "example.test", 10);
+        match summary {
+            StateSummary::CertCachedButInvalid { reason } => {
+                assert!(reason.contains("missing key file"));
+            }
+            other => panic!("expected CertCachedButInvalid, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn inspect_state_returns_invalid_when_cert_read_fails() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join("cert.pem")).unwrap();
+        std::fs::write(tmp.path().join("key.pem"), b"not a key").unwrap();
+
+        let summary = inspect_state(tmp.path(), "example.test", 10);
+        match summary {
+            StateSummary::CertCachedButInvalid { reason } => {
+                assert!(reason.contains("failed to read cert file"));
+            }
+            other => panic!("expected CertCachedButInvalid, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn inspect_state_returns_invalid_when_key_read_fails() {
+        let tmp = tempfile::tempdir().unwrap();
+        let now_unix = time::OffsetDateTime::now_utc().unix_timestamp();
+        let (cert_pem, _) = generate_cert(now_unix + 90 * 86_400);
+        std::fs::write(tmp.path().join("cert.pem"), cert_pem).unwrap();
+        std::fs::create_dir(tmp.path().join("key.pem")).unwrap();
+
+        let summary = inspect_state(tmp.path(), "example.test", 10);
+        match summary {
+            StateSummary::CertCachedButInvalid { reason } => {
+                assert!(reason.contains("failed to read key file"));
+            }
+            other => panic!("expected CertCachedButInvalid, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn inspect_state_returns_invalid_when_cert_expired() {
+        let tmp = tempfile::tempdir().unwrap();
+        let now_unix = time::OffsetDateTime::now_utc().unix_timestamp();
+        let (cert_pem, key_pem) = generate_cert(now_unix - 86_400);
+        std::fs::write(tmp.path().join("cert.pem"), cert_pem).unwrap();
+        std::fs::write(tmp.path().join("key.pem"), key_pem).unwrap();
+
+        let summary = inspect_state(tmp.path(), "example.test", 10);
+        match summary {
+            StateSummary::CertCachedButInvalid { reason } => {
+                assert!(reason.contains("cert expired for domain example.test"));
+            }
+            other => panic!("expected CertCachedButInvalid, got {other:?}"),
+        }
+    }
+
     // ── MockCertSink ─────────────────────────────────────────────────────────
 
     struct MockCertSink {
@@ -1242,6 +1307,54 @@ mod tests {
         sm.tick_at(now_unix).await.unwrap();
 
         assert_eq!(sink.published_names(), vec!["default".to_string()]);
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn successful_issuance_emits_heartbeat_when_due() {
+        let tmp = tempfile::tempdir().unwrap();
+        let now_unix = 1_000_000i64;
+        let (cert_pem, key_pem) = generate_cert(now_unix + 90 * 86_400);
+
+        struct DevNull;
+        impl CertSink for DevNull {
+            fn publish(&self, _: &str, _: &CertBundle) -> Result<(), SinkError> {
+                Ok(())
+            }
+        }
+
+        let issuer = Box::new(MockIssuer::always_ok(cert_pem, key_pem));
+        let mut sm =
+            AcmeStateMachine::new_with_issuer(test_config(tmp.path()), Box::new(DevNull), issuer);
+        sm.heartbeat_every_ticks = 1;
+
+        sm.tick_at(now_unix).await.unwrap();
+
+        assert!(logs_contain("envoy-acme heartbeat"));
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn issuance_error_emits_heartbeat_when_due() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        struct DevNull;
+        impl CertSink for DevNull {
+            fn publish(&self, _: &str, _: &CertBundle) -> Result<(), SinkError> {
+                Ok(())
+            }
+        }
+
+        let issuer = Box::new(MockIssuer::with_results(vec![Err(AcmeError::OrderFailed(
+            "network down".into(),
+        ))]));
+        let mut sm =
+            AcmeStateMachine::new_with_issuer(test_config(tmp.path()), Box::new(DevNull), issuer);
+        sm.heartbeat_every_ticks = 1;
+
+        let _ = sm.tick_at(1_000_000).await;
+
+        assert!(logs_contain("envoy-acme heartbeat"));
     }
 
     // ────────────────────────────────────────────────────────────────────────
