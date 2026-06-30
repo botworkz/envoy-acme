@@ -189,6 +189,7 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use instant_acme::{Authorization, ChallengeType, Identifier, OrderState};
+    use std::collections::VecDeque;
     use std::sync::Mutex;
 
     // ── helpers for constructing Authorization fixtures via serde ──────────
@@ -408,17 +409,17 @@ mod tests {
 
     struct MockAcmeOrder {
         authorizations_response: Option<Result<Vec<Authorization>, instant_acme::Error>>,
-        refresh_statuses: Vec<OrderStatus>,
+        refresh_statuses: VecDeque<OrderStatus>,
         refresh_state: OrderState,
         finalize_response: Option<Result<(), instant_acme::Error>>,
-        certificate_responses: Vec<Result<Option<String>, instant_acme::Error>>,
+        certificate_responses: VecDeque<Result<Option<String>, instant_acme::Error>>,
     }
 
     impl MockAcmeOrder {
         fn with_statuses(statuses: Vec<OrderStatus>) -> Self {
             Self {
                 authorizations_response: Some(Ok(vec![make_authz("valid", "example.test", &[])])),
-                refresh_statuses: statuses,
+                refresh_statuses: statuses.into(),
                 refresh_state: OrderState {
                     status: OrderStatus::Pending,
                     authorizations: Vec::new(),
@@ -427,7 +428,7 @@ mod tests {
                     certificate: Some("https://acme.test/cert".to_string()),
                 },
                 finalize_response: Some(Ok(())),
-                certificate_responses: vec![Ok(Some("CERT-CHAIN".to_string()))],
+                certificate_responses: VecDeque::from([Ok(Some("CERT-CHAIN".to_string()))]),
             }
         }
     }
@@ -449,9 +450,9 @@ mod tests {
         }
 
         async fn refresh(&mut self) -> Result<&OrderState, instant_acme::Error> {
-            if let Some(status) = self.refresh_statuses.first().copied() {
+            if let Some(status) = self.refresh_statuses.front().copied() {
                 self.refresh_state.status = status;
-                self.refresh_statuses.remove(0);
+                self.refresh_statuses.pop_front();
             }
             Ok(&self.refresh_state)
         }
@@ -461,15 +462,12 @@ mod tests {
         }
 
         async fn certificate(&mut self) -> Result<Option<String>, instant_acme::Error> {
-            if self.certificate_responses.is_empty() {
-                return Ok(None);
-            }
-            self.certificate_responses.remove(0)
+            self.certificate_responses.pop_front().unwrap_or(Ok(None))
         }
     }
 
     fn make_config() -> AcmeConfig {
-        let tempdir = tempfile::tempdir().expect("tempdir");
+        let temp_dir = tempfile::tempdir().expect("tempdir");
         AcmeConfig {
             directory_profile: None,
             directory_uri: "https://acme.test/directory".to_string(),
@@ -477,10 +475,10 @@ mod tests {
             contact: "mailto:test@example.test".to_string(),
             domains: vec!["example.test".to_string()],
             renewal_window_days: 30,
-            state_dir: tempdir.path().to_path_buf(),
+            state_dir: temp_dir.path().to_path_buf(),
             cert_sink: crate::config::CertSinkConfig {
                 sink_type: "files".to_string(),
-                cert_dir: tempdir.path().to_path_buf(),
+                cert_dir: temp_dir.path().to_path_buf(),
                 layout: crate::config::Layout::PerDomain,
             },
             tick_seconds: 60,
@@ -517,7 +515,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn issue_certificate_refresh_invalid_returns_order_failed() {
+    async fn issue_certificate_refresh_invalid_returns_not_ready_message() {
         let account = MockAcmeAccount {
             new_order_result: Mutex::new(Some(Ok(Box::new(MockAcmeOrder::with_statuses(vec![
                 OrderStatus::Invalid,
@@ -551,7 +549,8 @@ mod tests {
     #[tokio::test]
     async fn issue_certificate_certificate_error_is_propagated() {
         let mut order = MockAcmeOrder::with_statuses(vec![OrderStatus::Ready]);
-        order.certificate_responses = vec![Err(instant_acme::Error::Str("certificate-error"))];
+        order.certificate_responses =
+            VecDeque::from([Err(instant_acme::Error::Str("certificate-error"))]);
         let account = MockAcmeAccount {
             new_order_result: Mutex::new(Some(Ok(Box::new(order)))),
         };
