@@ -19,7 +19,8 @@ bootstrap_extensions:
           directory_ca_file: /etc/envoy/pebble-certs/pebble.minica.pem
           contact: mailto:admin@example.test
           domains:
-          - example.test
+          - a.example.test
+          - b.example.test
           renewal_window_days: 30
           # Low tick interval for the integration smoke test; raise in production.
           tick_seconds: 5
@@ -65,7 +66,8 @@ static_resources:
                 "@type": type.googleapis.com/google.protobuf.StringValue
                 value: |
                   domains:
-                  - example.test
+                  - a.example.test
+                  - b.example.test
           - name: envoy.filters.http.router
             typed_config:
               "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
@@ -82,10 +84,10 @@ static_resources:
           "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.DownstreamTlsContext
           common_tls_context:
             tls_certificate_sds_secret_configs:
-            - name: example_test_tls
+            - name: a_example_test_tls
               sds_config:
                 path_config_source:
-                  path: /var/lib/envoy-acme/certs/example.test.secret.yaml
+                  path: /var/lib/envoy-acme/certs/a.example.test.secret.yaml
 
       filters:
       - name: envoy.filters.network.http_connection_manager

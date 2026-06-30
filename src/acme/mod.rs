@@ -1427,6 +1427,37 @@ mod tests {
         assert!(loaded.is_some(), "superset SANs should be accepted");
     }
 
+    /// A cert whose SANs exactly match the two configured domains must be
+    /// accepted — the exact-match multi-domain case.
+    #[tokio::test]
+    async fn load_cached_bundle_ok_with_exact_multi_domain_match() {
+        let tmp = tempfile::tempdir().unwrap();
+        let now_unix = time::OffsetDateTime::now_utc().unix_timestamp();
+
+        let mut cfg = test_config(tmp.path());
+        cfg.domains = vec!["a.example.test".into(), "b.example.test".into()];
+
+        // Cert covers exactly the two configured domains.
+        let (cert_pem, key_pem) = generate_cert(
+            now_unix + 90 * 86_400,
+            &["a.example.test", "b.example.test"],
+        );
+        let bundle = CertBundle { cert_pem, key_pem };
+        let sm = AcmeStateMachine::new_with_issuer(
+            cfg,
+            dev_null_sink(),
+            Box::new(MockIssuer::with_results(vec![])),
+        );
+
+        sm.persist_bundle(&bundle).await.unwrap();
+        let loaded = sm.load_cached_bundle().await.unwrap();
+
+        assert!(
+            loaded.is_some(),
+            "cert with SANs exactly matching configured domains must be accepted"
+        );
+    }
+
     /// A cert whose SANs cover FEWER names than configured must be rejected.
     #[tokio::test]
     #[traced_test]
