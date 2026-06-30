@@ -126,15 +126,15 @@ jobs:
       run: |
         set -euo pipefail
         for i in $(seq 1 60); do
-          # The image ships a self-signed placeholder cert whose issuer
-          # CN is "a.example.test". Once FilesystemSink overwrites it with
-          # a Pebble-issued cert, the issuer DN changes (Pebble's CA CN
-          # contains "Pebble"). Wait until the issuer is no longer the
-          # placeholder.
-          ISSUER=$(docker compose exec -T envoy \
-            openssl x509 \
-              -in /var/lib/envoy-acme/certs/a.example.test.cert.pem \
-              -noout -issuer 2>/dev/null || true)
+          # The image ships a self-signed placeholder secret.yaml whose
+          # embedded cert issuer CN is the domain itself.  Once FilesystemSink
+          # atomically replaces it with a Pebble-issued cert, the issuer DN
+          # changes (Pebble's CA CN contains "Pebble").  Extract the first PEM
+          # block from the YAML and check its issuer.
+          ISSUER=$(docker compose exec -T envoy sh -c \
+            "awk '/-----BEGIN CERTIFICATE-----/,/-----END CERTIFICATE-----/' \
+             /var/lib/envoy-acme/certs/a.example.test.secret.yaml \
+             | openssl x509 -noout -issuer 2>/dev/null" || true)
           case "${ISSUER}" in
             *Pebble*) exit 0 ;;
           esac
@@ -161,10 +161,12 @@ jobs:
     - name: Verify certificate content and chain
       run: |
         set -euo pipefail
-        # Export the issued certificate from the container for verification.
-        # Multi-SAN certs use the first domain as the canonical filename prefix.
-        docker compose exec -T envoy \
-          cat /var/lib/envoy-acme/certs/a.example.test.cert.pem > /tmp/a.example.test.cert.pem
+        # Extract the leaf cert from the inlined secret.yaml for verification.
+        # The awk range extracts the first PEM block (the leaf certificate).
+        docker compose exec -T envoy sh -c \
+          "awk '/-----BEGIN CERTIFICATE-----/,/-----END CERTIFICATE-----/' \
+           /var/lib/envoy-acme/certs/a.example.test.secret.yaml" \
+          > /tmp/a.example.test.cert.pem
 
         # Both SANs must be present in the issued cert.
         openssl x509 -in /tmp/a.example.test.cert.pem -noout \
@@ -211,6 +213,25 @@ jobs:
           echo "SANs for ${NAME}: ${SAN}"
           echo "${SAN}" | grep -q "DNS:a.example.test"
           echo "${SAN}" | grep -q "DNS:b.example.test"
+        done
+
+    - name: Dump filesystem state on failure
+      if: failure()
+      run: |
+        echo '=== ls -laR /var/lib/envoy-acme ==='
+        docker compose exec -T envoy ls -laR /var/lib/envoy-acme || true
+        echo
+        for NAME in a.example.test b.example.test; do
+          FILE="/var/lib/envoy-acme/certs/${NAME}.secret.yaml"
+          echo "=== ${FILE} ==="
+          docker compose exec -T envoy stat "${FILE}" 2>&1 || true
+          echo "--- cert issuer / subject / SANs (from inline_string) ---"
+          docker compose exec -T envoy sh -c \
+            "awk '/-----BEGIN CERTIFICATE-----/,/-----END CERTIFICATE-----/' \
+             '${FILE}' | openssl x509 -noout -issuer -subject -ext subjectAltName 2>&1" || true
+          echo "--- secret.yaml contents ---"
+          docker compose exec -T envoy cat "${FILE}" 2>&1 || true
+          echo
         done
 
     - name: Dump logs on failure
