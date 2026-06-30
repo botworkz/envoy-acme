@@ -569,12 +569,15 @@ mod tests {
     #[traced_test]
     #[test]
     fn warn_if_state_dir_too_permissive_quiet_when_missing() {
-        let nonexistent = std::path::Path::new("/tmp/envoy_acme_test_nonexistent_dir_xyz_99999");
+        // Use a path that is guaranteed not to exist: a named subdirectory
+        // inside a freshly-created tempdir that we never actually create.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let nonexistent = tmp.path().join("does_not_exist");
 
         std::env::remove_var("ENVOY_ACME_ALLOW_INSECURE_STATE_DIR");
 
         // Must not panic; metadata() returns Err for missing path.
-        warn_if_state_dir_too_permissive(nonexistent);
+        warn_if_state_dir_too_permissive(&nonexistent);
 
         assert!(!logs_contain("group- or world-accessible"));
     }
