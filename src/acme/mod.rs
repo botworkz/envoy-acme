@@ -641,8 +641,39 @@ impl AcmeStateMachine {
 async fn load_backoff(state_dir: &Path) -> BackoffState {
     let path = state_dir.join(BACKOFF_FILE);
     match tokio::fs::read(&path).await {
-        Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_default(),
-        Err(_) => BackoffState::default(),
+        Ok(bytes) => match serde_json::from_slice::<BackoffState>(&bytes) {
+            Ok(state) => state,
+            Err(parse_err) => {
+                let ts = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                let nonce: u32 = rand::random();
+                let quarantine =
+                    path.with_file_name(format!("{BACKOFF_FILE}.corrupt.{ts}.{nonce:08x}"));
+                if let Err(rename_err) = tokio::fs::rename(&path, &quarantine).await {
+                    error!(
+                        path = %path.display(),
+                        error = %parse_err,
+                        rename_error = %rename_err,
+                        "backoff.json is corrupt (parse failed); rename for quarantine also failed — resetting to default"
+                    );
+                } else {
+                    error!(
+                        path = %path.display(),
+                        quarantine = %quarantine.display(),
+                        error = %parse_err,
+                        "backoff.json is corrupt (parse failed); quarantined and resetting to default"
+                    );
+                }
+                BackoffState::default()
+            }
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => BackoffState::default(),
+        Err(e) => {
+            error!(path = %path.display(), error = %e, "failed to read backoff.json; resetting to default");
+            BackoffState::default()
+        }
     }
 }
 
@@ -1685,10 +1716,47 @@ mod tests {
         });
     }
 
+    #[traced_test]
     #[tokio::test]
-    async fn invalid_backoff_json_defaults_to_empty_state() {
+    async fn invalid_backoff_json_quarantines_file_and_logs_error() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join(BACKOFF_FILE), b"{not-json").unwrap();
+
+        let state = load_backoff(tmp.path()).await;
+
+        // Falls back to default.
+        assert_eq!(state, BackoffState::default());
+        // Original file is gone (renamed to quarantine file).
+        assert!(
+            !tmp.path().join(BACKOFF_FILE).exists(),
+            "backoff.json should have been renamed away"
+        );
+        // A quarantine file matching the pattern was created.
+        let corrupt_files: Vec<_> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with("backoff.json.corrupt.")
+            })
+            .collect();
+        assert_eq!(
+            corrupt_files.len(),
+            1,
+            "expected exactly one quarantine file"
+        );
+        // Error was logged.
+        assert!(
+            logs_contain("backoff.json is corrupt"),
+            "expected an error log about corrupt backoff.json"
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_backoff_json_defaults_silently() {
+        let tmp = tempfile::tempdir().unwrap();
+        // No backoff.json written — first-run case.
 
         let state = load_backoff(tmp.path()).await;
 
