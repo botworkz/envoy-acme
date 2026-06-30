@@ -29,7 +29,7 @@ bootstrap_extensions:
             cert_dir: /var/lib/envoy-acme/certs
             layout: per_domain
         log:
-          level: info
+          level: debug
 
 static_resources:
   listeners:

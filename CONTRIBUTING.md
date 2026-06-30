@@ -101,8 +101,9 @@ The CI `integration` job validates a real end-to-end certificate issuance flow:
  │  ┌────────────────┐                          ▼           │
  │  │ challtestsrv   │              ┌───────────────────┐  │
  │  │ :8053 (DNS)    │              │     upstream      │  │
- │  │ :8055 (mgmt)   │              │  hashicorp/http-  │  │
- │  └────────────────┘              │  echo ":8080"     │  │
+ │  │ :8055 (mgmt)   │              │  envoyproxy/      │  │
+ │  └────────────────┘              │  toolshed echo    │  │
+ │                                  │  ":8080"          │  │
  │                                  └───────────────────┘  │
  └──────────────────────────────────────────────────────────┘
 ```
@@ -110,7 +111,7 @@ The CI `integration` job validates a real end-to-end certificate issuance flow:
 What the integration job verifies:
 1. Envoy starts with the dynamic module loaded.
 2. The module contacts Pebble and completes HTTP-01 challenge validation for **both** configured domains via the in-process HTTP filter.
-3. `FilesystemSink` writes `a.example.test.cert.pem`, `a.example.test.key.pem`, and the Envoy SDS secret file `a.example.test.secret.yaml` (first domain as canonical filename prefix).
+3. `FilesystemSink` atomically writes `a.example.test.secret.yaml` (first domain as canonical filename prefix) with the cert chain and private key embedded as `inline_string` values, so Envoy's SDS file watcher sees exactly one filesystem event per renewal.
 4. The issued cert contains SANs for **both** `a.example.test` and `b.example.test`.
 5. Envoy's HTTPS listener warms up using the SDS secret file and serves traffic.
 6. `curl --cacert pebble.minica.pem https://a.example.test:8443/` and `https://b.example.test:8443/` both return HTTP 200.

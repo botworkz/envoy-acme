@@ -124,21 +124,25 @@ filter is safe to place in front of other virtual hosts on a shared listener.
 ## Cert sink (`cert_sink`)
 
 `FilesystemSink` (the only sink type today) writes the certificate bundle to
-files in `cert_dir`.  The **first domain** in `acme.domains` is used as the
-canonical filename prefix for all output files:
+a single file in `cert_dir`.  The **first domain** in `acme.domains` is used as the
+canonical filename prefix:
 
 | File | Description |
 |---|---|
-| `<first-domain>.cert.pem` | PEM certificate chain (leaf + intermediates) |
-| `<first-domain>.key.pem` | PEM private key |
-| `<first-domain>.secret.yaml` | Envoy SDS TLS-certificate secret |
+| `<first-domain>.secret.yaml` | Envoy SDS TLS-certificate secret with cert chain and private key embedded as `inline_string` |
+
+The cert chain and private key are embedded directly in the YAML using Envoy's
+`inline_string` data source.  This means each renewal is a **single atomic file
+rename**, so Envoy's SDS directory watcher fires exactly once and always sees a
+consistent cert+key pair.  The file is written with mode `0o600` because it
+contains the private key.
 
 For **multi-SAN certs** (`acme.domains` contains more than one name), the
 issued certificate covers _all_ configured domains as Subject Alternative
-Names (SANs), but the output files are still named after the **first domain**
+Names (SANs), but the output file is still named after the **first domain**
 in the list.  For example, with `domains: [a.example.com, b.example.com]`,
-the files written are `a.example.com.cert.pem`, `a.example.com.key.pem`, and
-`a.example.com.secret.yaml` — even though the cert inside covers both names.
+the file written is `a.example.com.secret.yaml` — even though the cert inside
+covers both names.
 
 The SDS `path_config_source` in the Envoy listener must point at
 `<first-domain>.secret.yaml`.  SNI-based selection then works automatically:
