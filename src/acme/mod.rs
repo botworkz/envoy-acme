@@ -1,3 +1,4 @@
+//! ACME state machine and supporting sub-modules for certificate issuance and renewal.
 pub mod account;
 pub mod backoff;
 pub(crate) mod client;
@@ -196,6 +197,7 @@ fn should_emit_rate_limited_log(
     emit
 }
 
+/// Per-domain ACME renewal state machine that checks, issues, and caches TLS certificates each tick.
 pub struct AcmeStateMachine {
     config: AcmeConfig,
     sink: Box<dyn CertSink>,

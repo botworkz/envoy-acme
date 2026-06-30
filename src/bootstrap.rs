@@ -1,3 +1,4 @@
+//! Bootstrap extension configuration and Envoy server-lifecycle hooks for envoy-acme.
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use std::{fs, path::Path};
@@ -17,6 +18,7 @@ use crate::metrics;
 use crate::runtime::RuntimeBridge;
 use crate::state_lock::StateLock;
 
+/// Envoy bootstrap extension config that initialises the ACME renewal engine at startup.
 pub struct AcmeBootstrapConfig {
     runtime: RuntimeBridge,
     domains: Vec<String>,
@@ -30,6 +32,7 @@ pub struct AcmeBootstrapConfig {
 }
 
 impl AcmeBootstrapConfig {
+    /// Create a new `AcmeBootstrapConfig`, probing directories and initialising metrics.
     pub fn new(
         envoy_config: &mut dyn EnvoyBootstrapExtensionConfig,
         config: Config,
@@ -174,6 +177,7 @@ impl BootstrapExtensionConfig for AcmeBootstrapConfig {
     }
 }
 
+/// Envoy bootstrap extension that drives the ACME renewal loop for a server instance.
 pub struct AcmeBootstrapExtension {
     runtime: RuntimeBridge,
     domains: Vec<String>,

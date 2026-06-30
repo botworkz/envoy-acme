@@ -1,3 +1,4 @@
+//! Filesystem-backed [`CertSink`](super::CertSink) that writes cert/key files and an Envoy SDS secret.
 use std::path::PathBuf;
 
 use serde::Serialize;
@@ -6,6 +7,7 @@ use crate::cert_sink::{CertBundle, CertSink};
 use crate::config::Layout;
 use crate::errors::SinkError;
 
+/// Writes issued certificate bundles to the local filesystem in Envoy-SDS-compatible layout.
 pub struct FilesystemSink {
     dir: PathBuf,
     layout: Layout,
@@ -37,6 +39,7 @@ struct FileDataSource<'a> {
 }
 
 impl FilesystemSink {
+    /// Create a new `FilesystemSink` that writes files into `dir` using the specified `layout`.
     pub fn new(dir: PathBuf, layout: Layout) -> Self {
         Self { dir, layout }
     }

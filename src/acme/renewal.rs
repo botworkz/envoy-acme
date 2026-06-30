@@ -1,3 +1,4 @@
+//! Certificate renewal-window logic and X.509 expiry parsing.
 use crate::errors::AcmeError;
 
 /// Returns `true` if the certificate for `domain` should be renewed.
@@ -52,6 +53,7 @@ pub(crate) fn fnv1a(s: &str) -> u64 {
         .fold(OFFSET_BASIS, |h, b| (h ^ u64::from(b)).wrapping_mul(PRIME))
 }
 
+/// Parse a PEM certificate and return its `notAfter` expiry as a Unix timestamp.
 pub fn cert_not_after_unix(cert_pem: &[u8]) -> Result<i64, AcmeError> {
     let (_, pem) = x509_parser::pem::parse_x509_pem(cert_pem)
         .map_err(|e| AcmeError::OrderFailed(format!("failed parsing PEM certificate: {e}")))?;

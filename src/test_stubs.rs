@@ -3,6 +3,7 @@
 // tarpaulin (or any coverage tool) forces all SDK code live at link time.
 // At runtime in production, Envoy itself provides the real implementations.
 #![allow(non_snake_case)]
+#![allow(unsafe_code)]
 #![allow(unused_variables)]
 #![allow(clippy::missing_safety_doc)]
 

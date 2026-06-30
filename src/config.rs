@@ -1,3 +1,4 @@
+//! Configuration types for envoy-acme, parsed from JSON or YAML bytes at bootstrap.
 use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -7,10 +8,13 @@ use crate::errors::ConfigError;
 const LE_STAGING_URL: &str = "https://acme-staging-v02.api.letsencrypt.org/directory";
 const LE_PRODUCTION_URL: &str = "https://acme-v02.api.letsencrypt.org/directory";
 
+/// Top-level configuration for the envoy-acme module, combining ACME and log settings.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
+    /// ACME certificate issuance and renewal configuration.
     pub acme: AcmeConfig,
+    /// Log level configuration; defaults to `info` when not specified.
     #[serde(default)]
     pub log: LogConfig,
 }
@@ -237,6 +241,7 @@ impl TryFrom<RawAcmeConfig> for AcmeConfig {
     }
 }
 
+/// Validated ACME certificate issuance and renewal configuration.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(try_from = "RawAcmeConfig")]
 pub struct AcmeConfig {
@@ -252,11 +257,16 @@ pub struct AcmeConfig {
     /// are used.
     #[serde(default)]
     pub directory_ca_file: Option<PathBuf>,
+    /// ACME contact URL (e.g. `mailto:admin@example.com`) sent during account registration.
     pub contact: String,
+    /// Hostnames for which TLS certificates should be issued and renewed.
     pub domains: Vec<String>,
+    /// Number of days before expiry at which certificate renewal is triggered; defaults to 30.
     #[serde(default = "default_renewal_window_days")]
     pub renewal_window_days: u64,
+    /// Directory used to persist ACME account credentials, cached certificates, and backoff state.
     pub state_dir: PathBuf,
+    /// Configuration for the sink that receives issued certificates.
     pub cert_sink: CertSinkConfig,
     /// How often (in seconds) the ACME state machine timer fires to check for
     /// renewal.  Defaults to 60.  Set lower in integration environments.
@@ -302,26 +312,34 @@ impl Serialize for AcmeConfig {
     }
 }
 
+/// Configuration for the cert sink that receives and stores issued certificates.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CertSinkConfig {
+    /// Sink backend type; currently only `"filesystem"` is supported.
     #[serde(rename = "type")]
     pub sink_type: String,
+    /// Directory where issued certificate files are written.
     pub cert_dir: PathBuf,
+    /// File layout strategy used to arrange certificate files within `cert_dir`.
     #[serde(default)]
     pub layout: Layout,
 }
 
+/// Layout strategy controlling how [`FilesystemSink`](crate::cert_sink::filesystem::FilesystemSink) arranges cert files on disk.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum Layout {
+    /// Write one cert/key pair per domain, named `<domain>.cert.pem` and `<domain>.key.pem`.
     #[default]
     PerDomain,
 }
 
+/// Logging configuration applied at module startup.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct LogConfig {
+    /// Tracing log level filter (e.g. `"info"`, `"debug"`); defaults to `"info"`.
     #[serde(default = "default_log_level")]
     pub level: String,
 }
@@ -351,6 +369,7 @@ fn default_log_level() -> String {
 }
 
 impl Config {
+    /// Parse a `Config` from raw bytes, trying JSON first and falling back to YAML.
     pub fn from_bytes(raw: &[u8]) -> Result<Self, ConfigError> {
         match serde_json::from_slice(raw) {
             Ok(v) => Ok(v),
