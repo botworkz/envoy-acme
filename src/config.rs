@@ -197,8 +197,7 @@ impl TryFrom<RawAcmeConfig> for AcmeConfig {
             } else if value.chars().any(char::is_whitespace) {
                 "must not contain whitespace"
             } else if !value.is_ascii() {
-                "non-ASCII characters are not yet supported; \
-                 convert to A-label form (e.g. xn--mnchen-3ya.example) or wait for IDNA support in a future release"
+                "non-ASCII characters are not yet supported; convert to A-label form (e.g. xn--mnchen-3ya.example) or wait for IDNA support in a future release"
             } else {
                 continue;
             };
