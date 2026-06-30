@@ -601,6 +601,71 @@ mod tests {
         }
     }
 
+    #[test]
+    fn inspect_state_returns_invalid_when_key_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let now_unix = time::OffsetDateTime::now_utc().unix_timestamp();
+        let (cert_pem, _) = generate_cert(now_unix + 90 * 86_400);
+        std::fs::write(tmp.path().join("cert.pem"), cert_pem).unwrap();
+
+        let summary = inspect_state(tmp.path(), "example.test", 10);
+        match summary {
+            StateSummary::CertCachedButInvalid { reason } => {
+                assert!(reason.contains("missing key file"));
+            }
+            other => panic!("expected CertCachedButInvalid, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn inspect_state_returns_invalid_when_cert_read_fails() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join("cert.pem")).unwrap();
+        std::fs::write(tmp.path().join("key.pem"), b"not a key").unwrap();
+
+        let summary = inspect_state(tmp.path(), "example.test", 10);
+        match summary {
+            StateSummary::CertCachedButInvalid { reason } => {
+                assert!(reason.contains("failed to read cert file"));
+            }
+            other => panic!("expected CertCachedButInvalid, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn inspect_state_returns_invalid_when_key_read_fails() {
+        let tmp = tempfile::tempdir().unwrap();
+        let now_unix = time::OffsetDateTime::now_utc().unix_timestamp();
+        let (cert_pem, _) = generate_cert(now_unix + 90 * 86_400);
+        std::fs::write(tmp.path().join("cert.pem"), cert_pem).unwrap();
+        std::fs::create_dir(tmp.path().join("key.pem")).unwrap();
+
+        let summary = inspect_state(tmp.path(), "example.test", 10);
+        match summary {
+            StateSummary::CertCachedButInvalid { reason } => {
+                assert!(reason.contains("failed to read key file"));
+            }
+            other => panic!("expected CertCachedButInvalid, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn inspect_state_returns_invalid_when_cert_expired() {
+        let tmp = tempfile::tempdir().unwrap();
+        let now_unix = time::OffsetDateTime::now_utc().unix_timestamp();
+        let (cert_pem, key_pem) = generate_cert(now_unix - 86_400);
+        std::fs::write(tmp.path().join("cert.pem"), cert_pem).unwrap();
+        std::fs::write(tmp.path().join("key.pem"), key_pem).unwrap();
+
+        let summary = inspect_state(tmp.path(), "example.test", 10);
+        match summary {
+            StateSummary::CertCachedButInvalid { reason } => {
+                assert!(reason.contains("cert expired for domain example.test"));
+            }
+            other => panic!("expected CertCachedButInvalid, got {other:?}"),
+        }
+    }
+
     // ── MockCertSink ─────────────────────────────────────────────────────────
 
     struct MockCertSink {
@@ -625,6 +690,10 @@ mod tests {
     impl MockCertSink {
         fn call_count(&self) -> usize {
             self.calls.lock().unwrap().len()
+        }
+
+        fn published_names(&self) -> Vec<String> {
+            self.calls.lock().unwrap().clone()
         }
     }
 
@@ -1114,6 +1183,184 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn force_renew_uses_tick_and_updates_not_after() {
+        const STALE_NOT_AFTER_UNIX: i64 = 1;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let not_after = time::OffsetDateTime::now_utc().unix_timestamp() + 90 * 86_400;
+        let (cert_pem, key_pem) = generate_cert(not_after);
+
+        let sink = std::sync::Arc::new(MockCertSink::default());
+
+        struct ArcSink(std::sync::Arc<MockCertSink>);
+        impl CertSink for ArcSink {
+            fn publish(&self, name: &str, bundle: &CertBundle) -> Result<(), SinkError> {
+                self.0.publish(name, bundle)
+            }
+        }
+
+        let issuer = Box::new(MockIssuer::always_ok(cert_pem, key_pem));
+        let mut sm = AcmeStateMachine::new_with_issuer(
+            test_config(tmp.path()),
+            Box::new(ArcSink(sink.clone())),
+            issuer,
+        );
+        sm.last_not_after_unix = Some(STALE_NOT_AFTER_UNIX);
+
+        sm.force_renew().await.unwrap();
+
+        assert_eq!(sink.call_count(), 1);
+        assert_ne!(sm.last_not_after_unix, Some(STALE_NOT_AFTER_UNIX));
+        assert!(sm.last_not_after_unix.is_some());
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn issuance_with_unparseable_cert_logs_and_succeeds() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        struct DevNull;
+        impl CertSink for DevNull {
+            fn publish(&self, _: &str, _: &CertBundle) -> Result<(), SinkError> {
+                Ok(())
+            }
+        }
+
+        let issuer = Box::new(MockIssuer::with_results(vec![Ok(CertBundle {
+            cert_pem: b"not a cert".to_vec(),
+            key_pem: b"not a key".to_vec(),
+        })]));
+        let mut sm =
+            AcmeStateMachine::new_with_issuer(test_config(tmp.path()), Box::new(DevNull), issuer);
+
+        sm.tick_at(1_000_000).await.unwrap();
+
+        assert!(logs_contain(
+            "unable to parse not_after from issued certificate"
+        ));
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn non_rate_limited_error_does_not_escalate_backoff() {
+        // Intentionally hold the global metrics test lock across the async tick
+        // so metric updates remain isolated from other tests.
+        let _guard = crate::metrics::test_lock();
+        crate::metrics::reset_test_state();
+
+        let tmp = tempfile::tempdir().unwrap();
+
+        struct DevNull;
+        impl CertSink for DevNull {
+            fn publish(&self, _: &str, _: &CertBundle) -> Result<(), SinkError> {
+                Ok(())
+            }
+        }
+
+        let issuer = Box::new(MockIssuer::with_results(vec![Err(AcmeError::OrderFailed(
+            "network down".into(),
+        ))]));
+        let mut sm =
+            AcmeStateMachine::new_with_issuer(test_config(tmp.path()), Box::new(DevNull), issuer);
+
+        let err = sm.tick_at(1_000_000).await.unwrap_err();
+
+        assert!(matches!(err, AcmeError::OrderFailed(ref msg) if msg == "network down"));
+        assert_eq!(sm.backoff, BackoffState::default());
+        assert!(!tmp.path().join(BACKOFF_FILE).exists());
+
+        let metrics: HashSet<_> = crate::metrics::take_test_updates().into_iter().collect();
+        assert!(metrics.contains("envoy_acme_issuance_total:failure"));
+        assert!(metrics.contains("envoy_acme_consecutive_failures:a.example.test:0"));
+        assert!(metrics.contains("envoy_acme_next_retry_at_seconds:a.example.test:0"));
+    }
+
+    #[tokio::test]
+    async fn invalid_backoff_json_defaults_to_empty_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join(BACKOFF_FILE), b"{not-json").unwrap();
+
+        let state = load_backoff(tmp.path()).await;
+
+        assert_eq!(state, BackoffState::default());
+    }
+
+    #[tokio::test]
+    async fn publish_uses_default_domain_when_domains_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let now_unix = 1_000_000i64;
+        let (cert_pem, key_pem) = generate_cert(now_unix + 90 * 86_400);
+
+        let sink = std::sync::Arc::new(MockCertSink::default());
+
+        struct ArcSink(std::sync::Arc<MockCertSink>);
+        impl CertSink for ArcSink {
+            fn publish(&self, name: &str, bundle: &CertBundle) -> Result<(), SinkError> {
+                self.0.publish(name, bundle)
+            }
+        }
+
+        let mut config = test_config(tmp.path());
+        config.domains.clear();
+
+        let issuer = Box::new(MockIssuer::always_ok(cert_pem, key_pem));
+        let mut sm =
+            AcmeStateMachine::new_with_issuer(config, Box::new(ArcSink(sink.clone())), issuer);
+
+        sm.tick_at(now_unix).await.unwrap();
+
+        assert_eq!(sink.published_names(), vec!["default".to_string()]);
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn successful_issuance_emits_heartbeat_when_due() {
+        let tmp = tempfile::tempdir().unwrap();
+        let now_unix = 1_000_000i64;
+        let (cert_pem, key_pem) = generate_cert(now_unix + 90 * 86_400);
+
+        struct DevNull;
+        impl CertSink for DevNull {
+            fn publish(&self, _: &str, _: &CertBundle) -> Result<(), SinkError> {
+                Ok(())
+            }
+        }
+
+        let issuer = Box::new(MockIssuer::always_ok(cert_pem, key_pem));
+        let mut sm =
+            AcmeStateMachine::new_with_issuer(test_config(tmp.path()), Box::new(DevNull), issuer);
+        sm.heartbeat_every_ticks = 1;
+
+        sm.tick_at(now_unix).await.unwrap();
+
+        assert!(logs_contain("envoy-acme heartbeat"));
+    }
+
+    #[traced_test]
+    #[tokio::test]
+    async fn issuance_error_emits_heartbeat_when_due() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        struct DevNull;
+        impl CertSink for DevNull {
+            fn publish(&self, _: &str, _: &CertBundle) -> Result<(), SinkError> {
+                Ok(())
+            }
+        }
+
+        let issuer = Box::new(MockIssuer::with_results(vec![Err(AcmeError::OrderFailed(
+            "network down".into(),
+        ))]));
+        let mut sm =
+            AcmeStateMachine::new_with_issuer(test_config(tmp.path()), Box::new(DevNull), issuer);
+        sm.heartbeat_every_ticks = 1;
+
+        assert!(sm.tick_at(1_000_000).await.is_err());
+
+        assert!(logs_contain("envoy-acme heartbeat"));
+    }
+
     // ────────────────────────────────────────────────────────────────────────
     // Heartbeat tests
     //
@@ -1237,9 +1484,47 @@ mod tests {
         });
     }
 
+    #[traced_test]
+    #[tokio::test]
+    async fn heartbeat_blocked_by_backoff_reports_next_attempt() {
+        let tmp = tempfile::tempdir().unwrap();
+        let now_unix = 1_000_000i64;
+        let next_retry_at = now_unix + 3600;
+        std::fs::write(
+            tmp.path().join(BACKOFF_FILE),
+            serde_json::to_vec(&BackoffState {
+                consecutive_failures: 2,
+                next_retry_at: Some(next_retry_at),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        struct DevNull;
+        impl CertSink for DevNull {
+            fn publish(&self, _: &str, _: &CertBundle) -> Result<(), SinkError> {
+                Ok(())
+            }
+        }
+
+        let issuer = Box::new(MockIssuer::with_results(vec![]));
+        let mut sm =
+            AcmeStateMachine::new_with_issuer(test_config(tmp.path()), Box::new(DevNull), issuer);
+        sm.heartbeat_every_ticks = 1;
+
+        sm.tick_at(now_unix).await.unwrap();
+
+        assert!(logs_contain("envoy-acme heartbeat"));
+        assert!(logs_contain(&format!(
+            "next_attempt_at_unix=Some({next_retry_at})"
+        )));
+    }
+
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn cached_cert_emits_not_after_metric() {
+        // Intentionally hold the global metrics test lock across the async tick
+        // so metric updates remain isolated from other tests.
         let _guard = crate::metrics::test_lock();
         crate::metrics::reset_test_state();
 
