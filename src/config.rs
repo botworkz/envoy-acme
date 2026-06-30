@@ -7,6 +7,7 @@ use crate::errors::ConfigError;
 
 const LE_STAGING_URL: &str = "https://acme-staging-v02.api.letsencrypt.org/directory";
 const LE_PRODUCTION_URL: &str = "https://acme-v02.api.letsencrypt.org/directory";
+const MAILTO_PREFIX: &str = "mailto:";
 
 /// Top-level configuration for the envoy-acme module, combining ACME and log settings.
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -203,13 +204,13 @@ impl TryFrom<RawAcmeConfig> for AcmeConfig {
         if contact.is_empty() {
             return Err("acme.contact must be non-empty".to_string());
         }
-        if !contact.starts_with("mailto:") {
+        if !contact.starts_with(MAILTO_PREFIX) {
             return Err(format!(
                 "acme.contact must be a mailto: URI per RFC 8555 §7.3 \
                  (got {contact:?}); e.g. \"mailto:admin@example.test\""
             ));
         }
-        let address = &contact["mailto:".len()..];
+        let address = &contact[MAILTO_PREFIX.len()..];
         if address.is_empty() {
             return Err(format!(
                 "acme.contact has a mailto: prefix but no address; \

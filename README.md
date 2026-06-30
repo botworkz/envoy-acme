@@ -129,7 +129,7 @@ Notable config options in `acme:`:
 
 - `directory_ca_file` (optional): path to a PEM CA bundle to trust when connecting to the ACME directory (e.g. Pebble's self-signed CA in integration tests). Omit to use the system native roots.
 - `contact`: the operator contact address sent during ACME account registration.
-  Must be a `mailto:` URI per [RFC 8555 §7.3](https://www.rfc-editor.org/rfc/rfc8555#section-7.3),
+  Must be a `mailto:` URI per [RFC 8555 §7.3](https://datatracker.ietf.org/doc/html/rfc8555#section-7.3),
   e.g. `mailto:admin@example.test`. Other schemes are not accepted by any production CA and are
   rejected at config load.
 - `tick_seconds` (default `60`): how often the renewal state machine timer fires. Set lower in integration environments.
