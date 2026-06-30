@@ -72,7 +72,6 @@ fn evaluate_authorization(authz: &Authorization) -> Result<AuthorizationAction<'
         return Ok(AuthorizationAction::Skip);
     }
 
-    // Status is Pending — find the http-01 challenge.
     let challenge = authz
         .challenges
         .iter()
@@ -137,11 +136,6 @@ pub async fn issue_certificate(
         })
         .await?;
 
-    // RAII guard: every token pushed via `guard.push(...)` is removed from
-    // `ChallengeStore` when the guard drops, regardless of how this function
-    // exits — normal `Ok`, `?`-propagation, `tokio::time::timeout` cancellation,
-    // or future drop/abort.  The TTL eviction in `ChallengeStore` remains as
-    // defence-in-depth but is no longer the primary cleanup mechanism.
     let mut guard = scopeguard::guard(Vec::<String>::new(), |tokens| {
         for token in &tokens {
             challenge_store::remove(token);
@@ -204,8 +198,6 @@ mod tests {
     use std::collections::VecDeque;
     use std::sync::Mutex;
 
-    // ── helpers for constructing Authorization fixtures via serde ──────────
-
     fn make_authz(status: &str, domain: &str, challenge_types: &[&str]) -> Authorization {
         let challenges: Vec<serde_json::Value> = challenge_types
             .iter()
@@ -229,7 +221,6 @@ mod tests {
         serde_json::from_value(raw).expect("fixture must deserialise")
     }
 
-    /// Like `make_authz`, but lets tests control the exact challenge token.
     fn make_authz_with_token(
         status: &str,
         domain: &str,
@@ -263,8 +254,6 @@ mod tests {
         serde_json::from_value(raw).expect("fixture must deserialise")
     }
 
-    // ── build_identifiers ─────────────────────────────────────────────────
-
     #[test]
     fn build_identifiers_empty() {
         let ids = build_identifiers(&[]);
@@ -285,8 +274,6 @@ mod tests {
         assert_eq!(ids.len(), 3);
         assert_eq!(ids[2], Identifier::Dns("c.test".to_owned()));
     }
-
-    // ── evaluate_authorization ────────────────────────────────────────────
 
     #[test]
     fn evaluate_authorization_valid_returns_skip() {
@@ -334,7 +321,6 @@ mod tests {
 
     #[test]
     fn evaluate_authorization_error_message_exact_format() {
-        // Verify the error string contains exactly the expected substring.
         let authz = make_authz("expired", "expired.test", &[]);
         let err = evaluate_authorization(&authz).expect_err("should fail");
         let AcmeError::OrderFailed(msg) = err else {
@@ -345,8 +331,6 @@ mod tests {
             "message was: {msg}"
         );
     }
-
-    // ── classify_poll_status ──────────────────────────────────────────────
 
     #[test]
     fn classify_poll_status_ready_is_done() {
@@ -388,13 +372,10 @@ mod tests {
         ));
     }
 
-    // ── build_csr ─────────────────────────────────────────────────────────
-
     #[test]
     fn build_csr_returns_non_empty_der() {
         let (key_pair, csr_der) = build_csr(&["example.com".to_owned()]).expect("build_csr failed");
         assert!(!csr_der.is_empty(), "CSR DER must not be empty");
-        // Sanity-check: key pair serialises to PEM without error.
         let pem = key_pair.serialize_pem();
         assert!(pem.contains("PRIVATE KEY"), "key PEM looks wrong: {pem}");
     }
@@ -405,8 +386,6 @@ mod tests {
         let (_, csr_der) = build_csr(&domains).expect("build_csr failed");
         assert!(!csr_der.is_empty());
     }
-
-    // ── assemble_bundle ───────────────────────────────────────────────────
 
     #[test]
     fn assemble_bundle_some_chain_produces_bundle() {
@@ -715,13 +694,6 @@ mod tests {
         assert_eq!(bundle.cert_pem, b"CERT-CHAIN".to_vec());
     }
 
-    // ── RAII cleanup tests ────────────────────────────────────────────────
-    //
-    // These four tests verify that every HTTP-01 challenge token registered by
-    // `issue_certificate` is removed from `ChallengeStore` regardless of how
-    // the function exits: normal `Ok`, `?`-propagation of an `Err`, future
-    // abort/drop, and `tokio::time::timeout` cancellation.
-
     /// A delay much longer than any test timeout, used to simulate a mock that
     /// blocks indefinitely (e.g. a slow CA) so that abort/timeout tests can
     /// fire before the mock resolves.
@@ -773,7 +745,6 @@ mod tests {
         const TOKEN: &str = "tok-future-drop";
         let mut order = MockAcmeOrder::with_statuses(vec![]);
         order.authorizations_response = Some(Ok(vec![make_pending_authz(TOKEN)]));
-        // Block long enough for the token to be inserted, then sleep until aborted.
         order.set_challenge_ready_delay_ms = MOCK_LONG_DELAY_MS;
         let account = std::sync::Arc::new(MockAcmeAccount {
             new_order_result: Mutex::new(Some(Ok(Box::new(order)))),
@@ -784,9 +755,7 @@ mod tests {
             let config = config.clone();
             async move { issue_certificate(&config, account.as_ref()).await }
         });
-        // Give the spawned future time to reach (and enter) set_challenge_ready.
         sleep(Duration::from_millis(50)).await;
-        // The token must be in the store before the abort.
         assert!(
             challenge_store::lookup(TOKEN).is_some(),
             "token '{TOKEN}' should be in the store before abort"
@@ -808,7 +777,6 @@ mod tests {
         const TOKEN: &str = "tok-timeout";
         let mut order = MockAcmeOrder::with_statuses(vec![]);
         order.authorizations_response = Some(Ok(vec![make_pending_authz(TOKEN)]));
-        // Sleep well beyond the 5 ms timeout so the outer timeout fires first.
         order.set_challenge_ready_delay_ms = MOCK_LONG_DELAY_MS;
         let account = MockAcmeAccount {
             new_order_result: Mutex::new(Some(Ok(Box::new(order)))),

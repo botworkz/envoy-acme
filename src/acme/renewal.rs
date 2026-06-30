@@ -70,14 +70,12 @@ mod tests {
     #[test]
     fn renewal_window_logic() {
         let now = 1_000_000;
-        // Inside the 30-day window → renew.
         assert!(needs_renewal_at_with_domain_offset(
             now + 5 * 86_400,
             now,
             30,
             "",
         ));
-        // Outside the 30-day window → don't renew.
         assert!(!needs_renewal_at_with_domain_offset(
             now + 100 * 86_400,
             now,
@@ -90,7 +88,6 @@ mod tests {
     fn domain_offset_is_deterministic() {
         let not_after = 1_000_000 + 90 * 86_400;
         let window_days = 30u64;
-        // Calling twice with the same inputs must return the same result.
         let r1 =
             needs_renewal_at_with_domain_offset(not_after, 1_000_000, window_days, "a.example");
         let r2 =
@@ -100,8 +97,6 @@ mod tests {
 
     #[test]
     fn domain_offsets_span_window() {
-        // Generate 100 distinct domains and collect their offsets.
-        // More than half the window length must be covered (sanity check).
         let window_days = 30u64;
         let window_secs = window_days * 86_400;
         let offsets: Vec<u64> = (0..100u32)
