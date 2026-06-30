@@ -25,6 +25,7 @@ const SENTINEL_FILE: &str = "bundle.ok";
 const BACKOFF_FILE: &str = "backoff.json";
 const SECONDS_PER_DAY: i64 = 86_400;
 const DEFAULT_HEARTBEAT_EVERY_TICKS: u32 = 60;
+const RECOVERY_REQUIRED_LOG_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
 
 fn sha256_hex(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
@@ -161,6 +162,18 @@ impl Issuer for RealIssuer {
 // State machine
 // ---------------------------------------------------------------------------
 
+/// Extract the ACME problem type URN from an error, if available.
+///
+/// Returns the `type` field of the problem document for `Protocol(Api(…))`
+/// errors.  Returns `None` for all other error variants.
+fn acme_problem_type(e: &AcmeError) -> Option<&str> {
+    if let AcmeError::Protocol(instant_acme::Error::Api(problem)) = e {
+        problem.r#type.as_deref()
+    } else {
+        None
+    }
+}
+
 pub struct AcmeStateMachine {
     config: AcmeConfig,
     sink: Box<dyn CertSink>,
@@ -170,6 +183,9 @@ pub struct AcmeStateMachine {
     heartbeat_every_ticks: u32,
     ticks_since_last_heartbeat: u32,
     issuer: Box<dyn Issuer>,
+    /// Timestamp of the last `RecoveryRequired` error log emission.
+    /// Used to rate-limit log spam on repeated failures.
+    last_recovery_required_log: Option<Instant>,
 }
 
 impl AcmeStateMachine {
@@ -195,6 +211,7 @@ impl AcmeStateMachine {
             heartbeat_every_ticks: DEFAULT_HEARTBEAT_EVERY_TICKS,
             ticks_since_last_heartbeat: 0,
             issuer,
+            last_recovery_required_log: None,
         }
     }
 
@@ -317,30 +334,62 @@ impl AcmeStateMachine {
             }
             Err(e) => {
                 let elapsed = issuance_started.elapsed();
-                metrics::record_issuance_failure(domain, elapsed);
-                if matches!(
-                    backoff::classify_acme_error(&e),
-                    backoff::ErrorClass::RateLimited
-                ) {
-                    self.backoff.record_rate_limit(now_unix);
-                    persist_backoff(&self.config.state_dir, &self.backoff).await?;
-                    let next_retry_at = self.backoff.next_retry_at.unwrap_or(0);
-                    info!(
-                        domain,
-                        next_retry_at,
-                        consecutive_failures = self.backoff.consecutive_failures,
-                        "rate-limited by ACME server, backing off"
-                    );
-                    if let Ok(next_retry_at_unix) = u64::try_from(next_retry_at) {
-                        metrics::set_next_retry_at(domain, next_retry_at_unix);
+                let error_class = backoff::classify_acme_error(&e);
+                let problem_type = acme_problem_type(&e).unwrap_or("unknown");
+                match error_class {
+                    backoff::ErrorClass::RateLimited => {
+                        metrics::record_issuance_failure(domain, elapsed);
+                        self.backoff.record_rate_limit(now_unix);
+                        persist_backoff(&self.config.state_dir, &self.backoff).await?;
+                        let next_retry_at = self.backoff.next_retry_at.unwrap_or(0);
+                        info!(
+                            domain,
+                            next_retry_at,
+                            consecutive_failures = self.backoff.consecutive_failures,
+                            "rate-limited by ACME server, backing off"
+                        );
+                        if let Ok(next_retry_at_unix) = u64::try_from(next_retry_at) {
+                            metrics::set_next_retry_at(domain, next_retry_at_unix);
+                        }
+                    }
+                    backoff::ErrorClass::Permanent => {
+                        metrics::record_issuance_permanent(domain, elapsed);
+                        error!(
+                            domain,
+                            problem_type, %e,
+                            "permanent ACME error (bug-class): will retry but operator should investigate"
+                        );
+                    }
+                    backoff::ErrorClass::RecoveryRequired => {
+                        metrics::record_issuance_recovery_required(domain, elapsed);
+                        let now_instant = Instant::now();
+                        let should_log = self
+                            .last_recovery_required_log
+                            .map(|t| {
+                                now_instant.duration_since(t) >= RECOVERY_REQUIRED_LOG_INTERVAL
+                            })
+                            .unwrap_or(true);
+                        if should_log {
+                            error!(
+                                domain,
+                                problem_type, %e,
+                                "ACME account recovery required: operator action needed \
+                                 (e.g. delete account.json and re-register, or check domain \
+                                 authorisation); this message is rate-limited to once per 60 s"
+                            );
+                            self.last_recovery_required_log = Some(now_instant);
+                        }
+                    }
+                    backoff::ErrorClass::Transient => {
+                        metrics::record_issuance_failure(domain, elapsed);
                     }
                 }
                 metrics::set_consecutive_failures(domain, self.backoff.consecutive_failures);
                 if emit_heartbeat {
                     self.emit_heartbeat(now_unix, false);
                 }
-                // Non-rate-limit errors propagate as-is; the caller logs them
-                // and retries on the next ordinary tick interval.
+                // All error classes propagate the error; the caller retries on
+                // the next ordinary tick interval.
                 Err(e)
             }
         }
@@ -1469,6 +1518,132 @@ mod tests {
         assert!(metrics.contains("envoy_acme_issuance_total:failure"));
         assert!(metrics.contains("envoy_acme_consecutive_failures:a.example.test:0"));
         assert!(metrics.contains("envoy_acme_next_retry_at_seconds:a.example.test:0"));
+    }
+
+    fn account_does_not_exist_error() -> AcmeError {
+        let problem: instant_acme::Problem = serde_json::from_value(serde_json::json!({
+            "type": "urn:ietf:params:acme:error:accountDoesNotExist",
+            "detail": "account not found on server"
+        }))
+        .unwrap();
+        AcmeError::Protocol(instant_acme::Error::Api(problem))
+    }
+
+    fn malformed_error() -> AcmeError {
+        let problem: instant_acme::Problem = serde_json::from_value(serde_json::json!({
+            "type": "urn:ietf:params:acme:error:malformed",
+            "detail": "request was malformed"
+        }))
+        .unwrap();
+        AcmeError::Protocol(instant_acme::Error::Api(problem))
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn permanent_error_emits_permanent_metric_label() {
+        let _guard = crate::metrics::test_lock();
+        crate::metrics::reset_test_state();
+
+        let tmp = tempfile::tempdir().unwrap();
+
+        struct DevNull;
+        impl CertSink for DevNull {
+            fn publish(&self, _: &str, _: &CertBundle) -> Result<(), SinkError> {
+                Ok(())
+            }
+        }
+
+        let issuer = Box::new(MockIssuer::with_results(vec![Err(malformed_error())]));
+        let mut sm =
+            AcmeStateMachine::new_with_issuer(test_config(tmp.path()), Box::new(DevNull), issuer);
+
+        assert!(sm.tick_at(1_000_000).await.is_err());
+
+        let metrics: HashSet<_> = crate::metrics::take_test_updates().into_iter().collect();
+        assert!(
+            metrics.contains("envoy_acme_issuance_total:permanent"),
+            "expected 'permanent' label but got: {metrics:?}"
+        );
+        assert!(
+            !metrics.contains("envoy_acme_issuance_total:failure"),
+            "permanent error must not emit 'failure' label"
+        );
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn recovery_required_error_emits_recovery_required_metric_label() {
+        let _guard = crate::metrics::test_lock();
+        crate::metrics::reset_test_state();
+
+        let tmp = tempfile::tempdir().unwrap();
+
+        struct DevNull;
+        impl CertSink for DevNull {
+            fn publish(&self, _: &str, _: &CertBundle) -> Result<(), SinkError> {
+                Ok(())
+            }
+        }
+
+        let issuer = Box::new(MockIssuer::with_results(vec![Err(
+            account_does_not_exist_error(),
+        )]));
+        let mut sm =
+            AcmeStateMachine::new_with_issuer(test_config(tmp.path()), Box::new(DevNull), issuer);
+
+        assert!(sm.tick_at(1_000_000).await.is_err());
+
+        let metrics: HashSet<_> = crate::metrics::take_test_updates().into_iter().collect();
+        assert!(
+            metrics.contains("envoy_acme_issuance_total:recovery_required"),
+            "expected 'recovery_required' label but got: {metrics:?}"
+        );
+        assert!(
+            !metrics.contains("envoy_acme_issuance_total:failure"),
+            "recovery_required error must not emit 'failure' label"
+        );
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[traced_test]
+    #[tokio::test]
+    async fn recovery_required_log_is_rate_limited_to_once_per_60s() {
+        let _guard = crate::metrics::test_lock();
+        crate::metrics::reset_test_state();
+
+        let tmp = tempfile::tempdir().unwrap();
+
+        struct DevNull;
+        impl CertSink for DevNull {
+            fn publish(&self, _: &str, _: &CertBundle) -> Result<(), SinkError> {
+                Ok(())
+            }
+        }
+
+        let issuer = Box::new(MockIssuer::with_results(vec![
+            Err(account_does_not_exist_error()),
+            Err(account_does_not_exist_error()),
+        ]));
+        let mut sm =
+            AcmeStateMachine::new_with_issuer(test_config(tmp.path()), Box::new(DevNull), issuer);
+
+        // First tick: should log.
+        assert!(sm.tick_at(1_000_000).await.is_err());
+        // Second tick immediately after: should NOT log again (< 60 s elapsed).
+        assert!(sm.tick_at(1_000_001).await.is_err());
+
+        logs_assert(|lines: &[&str]| {
+            let count = lines
+                .iter()
+                .filter(|line| line.contains("ACME account recovery required"))
+                .count();
+            match count {
+                1 => Ok(()),
+                n => Err(format!(
+                    "expected exactly one recovery-required log within 60 s, got {n}"
+                )),
+            }
+        });
     }
 
     #[tokio::test]

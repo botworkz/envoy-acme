@@ -119,6 +119,28 @@ pub(crate) fn record_issuance_failure(_domain: &str, duration: Duration) {
     ]);
 }
 
+pub(crate) fn record_issuance_permanent(_domain: &str, duration: Duration) {
+    enqueue_many(vec![
+        MetricUpdate::IssuanceTotal {
+            result: "permanent",
+        },
+        MetricUpdate::IssuanceDuration {
+            seconds: duration_to_seconds(duration),
+        },
+    ]);
+}
+
+pub(crate) fn record_issuance_recovery_required(_domain: &str, duration: Duration) {
+    enqueue_many(vec![
+        MetricUpdate::IssuanceTotal {
+            result: "recovery_required",
+        },
+        MetricUpdate::IssuanceDuration {
+            seconds: duration_to_seconds(duration),
+        },
+    ]);
+}
+
 pub(crate) fn set_consecutive_failures(domain: &str, count: u32) {
     enqueue(MetricUpdate::ConsecutiveFailures {
         domain: domain.to_string(),
