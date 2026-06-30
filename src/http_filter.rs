@@ -164,6 +164,10 @@ mod tests {
         }
     }
 
+    fn make_config(domains: &[&str]) -> AcmeHttpFilterConfig {
+        AcmeHttpFilterConfig::new(domains.iter().map(|s| (*s).to_string()).collect())
+    }
+
     // ── normalize_host ────────────────────────────────────────────────────────
 
     #[test]
@@ -231,6 +235,11 @@ mod tests {
             .returning(|_| Some(EnvoyBuffer::new(b"/.well-known/acme-challenge/token-1")));
 
         envoy
+            .expect_get_request_header_value()
+            .with(eq(":authority"))
+            .returning(|_| Some(EnvoyBuffer::new(b"a.example.test")));
+
+        envoy
             .expect_send_response()
             .withf(|status, headers, body, details| {
                 *status == 200
@@ -256,7 +265,7 @@ mod tests {
 
     #[test]
     fn config_factory_creates_filter() {
-        let config = AcmeHttpFilterConfig;
+        let config = make_config(&[]);
         let mut envoy = MockEnvoyHttpFilter::new();
         let mut filter = config.new_http_filter(&mut envoy);
 
@@ -274,7 +283,7 @@ mod tests {
 
     #[test]
     fn continue_when_path_header_missing() {
-        let mut filter = AcmeHttpFilter;
+        let mut filter = make_filter(&[]);
         let mut envoy = MockEnvoyHttpFilter::new();
 
         envoy
@@ -291,7 +300,7 @@ mod tests {
 
     #[test]
     fn continue_when_challenge_path_has_empty_token() {
-        let mut filter = AcmeHttpFilter;
+        let mut filter = make_filter(&[]);
         let mut envoy = MockEnvoyHttpFilter::new();
 
         envoy
@@ -308,7 +317,7 @@ mod tests {
 
     #[test]
     fn continue_when_challenge_path_token_contains_slash() {
-        let mut filter = AcmeHttpFilter;
+        let mut filter = make_filter(&[]);
         let mut envoy = MockEnvoyHttpFilter::new();
 
         envoy
@@ -325,7 +334,7 @@ mod tests {
 
     #[test]
     fn continue_when_challenge_path_token_exceeds_max_len() {
-        let mut filter = AcmeHttpFilter;
+        let mut filter = make_filter(&[]);
         let mut envoy = MockEnvoyHttpFilter::new();
         let long_token = "a".repeat(MAX_TOKEN_LEN + 1);
         let path = format!("/.well-known/acme-challenge/{long_token}");
@@ -344,7 +353,7 @@ mod tests {
 
     #[test]
     fn continue_when_challenge_path_token_is_non_utf8() {
-        let mut filter = AcmeHttpFilter;
+        let mut filter = make_filter(&[]);
         let mut envoy = MockEnvoyHttpFilter::new();
 
         envoy
@@ -364,13 +373,18 @@ mod tests {
         let token = "miss-token-abc-123";
         let path = format!("/.well-known/acme-challenge/{token}");
 
-        let mut filter = AcmeHttpFilter;
+        let mut filter = make_filter(&["example.test"]);
         let mut envoy = MockEnvoyHttpFilter::new();
 
         envoy
             .expect_get_request_header_value()
             .with(eq(":path"))
             .returning(move |_| Some(EnvoyBuffer::new(path.as_bytes())));
+
+        envoy
+            .expect_get_request_header_value()
+            .with(eq(":authority"))
+            .returning(|_| Some(EnvoyBuffer::new(b"example.test")));
 
         envoy
             .expect_send_response()
