@@ -380,6 +380,8 @@ impl Config {
 
 #[cfg(test)]
 mod tests {
+    use tracing_test::traced_test;
+
     use super::*;
 
     fn base_yaml(extra: &str) -> String {
@@ -705,7 +707,8 @@ acme:
         );
     }
 
-    // custom + http + allow_insecure_directory: true → accepted
+    // custom + http + allow_insecure_directory: true → accepted; must warn
+    #[traced_test]
     #[test]
     fn custom_profile_http_uri_with_opt_in_accepted() {
         let raw = base_yaml(
@@ -714,6 +717,11 @@ acme:
         let cfg = Config::from_bytes(raw.as_bytes())
             .expect("http custom URI with opt-in should be accepted");
         assert_eq!(cfg.acme.directory_uri, "http://internal-acme.test/dir");
+        // The tracing::warn! in the "http" + Custom branch must fire.
+        assert!(
+            logs_contain("traverse the network in cleartext"),
+            "warn log must mention cleartext traversal"
+        );
     }
 
     // custom + https → accepted (no warn needed, standard path)

@@ -1018,10 +1018,88 @@ mod tests {
     //   `CompletionCallback::new` is `pub(crate)` inside the SDK — there is no
     //   public factory or mock. The SDK needs an upstream change before this
     //   branch can be unit-tested.
-    //
-    // Test L (on_drain_started / on_shutdown when runtime.shutdown() returns Err):
-    //   skipped because `RuntimeBridge::panic_for_test()` is a private `fn` in
-    //   `runtime.rs`; tests in `bootstrap.rs` cannot call it. Making it
-    //   `pub(crate)` did not measurably close the gap against the 60 % floor, so
-    //   option (a) — leave it uncovered — was chosen.
+
+    // =========================================================================
+    // Test L: on_server_initialized — runtime.start() returns Err
+    // =========================================================================
+    // Triggered by calling on_server_initialized when the runtime thread has
+    // already panicked and its channel receiver is dropped, so try_send returns
+    // TrySendError::Closed.  RuntimeBridge::panic_for_test is pub(crate) so
+    // this test module can reach it.
+
+    #[test]
+    fn on_server_initialized_start_fails_when_runtime_dead() {
+        let state_tmp = tempfile::tempdir().unwrap();
+        let cert_tmp = tempfile::tempdir().unwrap();
+        let config = test_config(state_tmp.path(), cert_tmp.path());
+        let runtime = RuntimeBridge::new(config);
+
+        assert!(
+            wait_for(Instant::now() + Duration::from_millis(500), || {
+                runtime.is_alive()
+            }),
+            "runtime should become alive"
+        );
+
+        // Kill the runtime thread via the test-only panic injection.
+        runtime.panic_for_test().expect("panic command should send");
+        assert!(
+            wait_for(Instant::now() + Duration::from_millis(500), || {
+                !runtime.is_alive()
+            }),
+            "runtime should die after panic"
+        );
+        runtime.join_for_test();
+
+        // on_server_initialized calls runtime.start(); the Err branch must be
+        // reached without panicking (the error is logged via envoy_log_error!).
+        let mut ext = AcmeBootstrapExtension {
+            runtime: runtime.clone(),
+            domains: vec!["example.test".into()],
+            state_dir: state_tmp.path().to_path_buf(),
+            renewal_window_days: 30,
+        };
+        let mut fake_ext = FakeEnvoyBootstrapExtension;
+        ext.on_server_initialized(&mut fake_ext); // must not panic
+    }
+
+    // =========================================================================
+    // Test M: on_drain_started — runtime.shutdown() returns Err
+    // =========================================================================
+
+    #[test]
+    fn on_drain_started_shutdown_fails_when_runtime_dead() {
+        let state_tmp = tempfile::tempdir().unwrap();
+        let cert_tmp = tempfile::tempdir().unwrap();
+        let config = test_config(state_tmp.path(), cert_tmp.path());
+        let runtime = RuntimeBridge::new(config);
+
+        assert!(
+            wait_for(Instant::now() + Duration::from_millis(500), || {
+                runtime.is_alive()
+            }),
+            "runtime should become alive"
+        );
+
+        // Kill the runtime thread.
+        runtime.panic_for_test().expect("panic command should send");
+        assert!(
+            wait_for(Instant::now() + Duration::from_millis(500), || {
+                !runtime.is_alive()
+            }),
+            "runtime should die after panic"
+        );
+        runtime.join_for_test();
+
+        // on_drain_started calls runtime.shutdown(); the Err branch must be
+        // reached without panicking.
+        let mut ext = AcmeBootstrapExtension {
+            runtime: runtime.clone(),
+            domains: vec!["example.test".into()],
+            state_dir: state_tmp.path().to_path_buf(),
+            renewal_window_days: 30,
+        };
+        let mut fake_ext = FakeEnvoyBootstrapExtension;
+        ext.on_drain_started(&mut fake_ext); // must not panic
+    }
 }
