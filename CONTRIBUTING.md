@@ -95,8 +95,9 @@ The CI `integration` job validates a real end-to-end certificate issuance flow:
  │  ┌────────────────┐                          ▼           │
  │  │ challtestsrv   │              ┌───────────────────┐  │
  │  │ :8053 (DNS)    │              │     upstream      │  │
- │  │ :8055 (mgmt)   │              │  hashicorp/http-  │  │
- │  └────────────────┘              │  echo ":8080"     │  │
+ │  │ :8055 (mgmt)   │              │  envoyproxy/      │  │
+ │  └────────────────┘              │  toolshed echo    │  │
+ │                                  │  ":8080"          │  │
  │                                  └───────────────────┘  │
  └──────────────────────────────────────────────────────────┘
 ```

@@ -40,7 +40,8 @@ services:
       ENVOY_DYNAMIC_MODULES_SEARCH_PATH: /etc/envoy/modules
 
   upstream:
-    image: hashicorp/http-echo:latest
-    command: ["-text=hello from upstream", "-listen=:8080"]
+    build:
+      context: .
+      dockerfile: Dockerfile.upstream
     expose:
     - "8080"
