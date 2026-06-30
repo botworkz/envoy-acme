@@ -49,6 +49,18 @@ without satisfying the criteria above is a regression of test discipline.
   by the `integration` CI job, which loads the built `.so` into Envoy and
   runs end-to-end ACME issuance against Pebble.
 
+- `src/test_stubs.rs` — stub implementations of Envoy SDK callback symbols
+  required to make the test binary link under `cargo tarpaulin`. The SDK's
+  `Drop` impls call `envoy_dynamic_module_callback_*` symbols provided by
+  Envoy's loader at `dlopen` time; without these stubs the linker fails.
+  The stubs contain no logic and cannot be meaningfully unit-tested.
+
+- `src/acme/account_test_server.rs` — in-process TLS mock ACME server used
+  as a test fixture by `src/acme/account.rs` tests. This is test
+  infrastructure (the thing tests use, not the thing tests assert against),
+  so it is not itself unit-testable in the usual sense. Bugs in this file
+  surface as failures in the tests that consume it.
+
 ## End-to-end stack
 
 ```bash

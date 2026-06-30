@@ -425,4 +425,260 @@ mod tests {
         .await;
         assert!(matches!(result, Err(AcmeError::Json(_))));
     }
+
+    // =========================================================================
+    // Network-path tests using the in-process mock ACME server.
+    // =========================================================================
+
+    use crate::acme::account_test_server::{CannedResponse, MockAcmeServer, ResponseTable};
+
+    /// Create a new account when no credentials file exists.
+    /// Exercises the `Account::create_with_http` → write-to-file path.
+    #[tokio::test]
+    async fn load_or_create_account_creates_new_when_file_absent() {
+        install_ring();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let account_path = tmp.path().join("account.json");
+        let ca_path = tmp.path().join("ca.pem");
+
+        let server = MockAcmeServer::start(|base_url| {
+            ResponseTable::new()
+                .with_directory(base_url)
+                .with_new_nonce("nonce-create-1") // lgtm[rust/hard-coded-cryptographic-value]
+                .with_new_account_success(&format!("{base_url}/acme/acct/1"))
+        })
+        .await;
+
+        std::fs::write(&ca_path, server.ca_cert_pem()).expect("write ca cert");
+
+        let result = load_or_create_account(
+            &server.directory_uri(),
+            "mailto:test@example.test",
+            &account_path,
+            Some(&ca_path),
+        )
+        .await;
+
+        assert!(result.is_ok(), "expected Ok, got error");
+        assert!(account_path.exists(), "credentials file should be written");
+        assert_eq!(
+            server.request_count("GET", "/directory"),
+            1,
+            "GET /directory once"
+        );
+        assert_eq!(
+            server.request_count("HEAD", "/acme/new-nonce"),
+            1,
+            "HEAD /acme/new-nonce once"
+        );
+        assert_eq!(
+            server.request_count("POST", "/acme/new-acct"),
+            1,
+            "POST /acme/new-acct once"
+        );
+    }
+
+    /// Load existing credentials from file (with custom CA).
+    /// Exercises the `Account::from_credentials_and_http` path.
+    #[tokio::test]
+    async fn load_or_create_account_loads_existing_when_file_present() {
+        install_ring();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let account_path = tmp.path().join("account.json");
+        let ca_path = tmp.path().join("ca.pem");
+
+        // Start a server that serves the directory document only.
+        // The `from_credentials_and_http` path fetches the directory to
+        // obtain fresh DirectoryUrls; it does NOT POST to new-acct.
+        let server = MockAcmeServer::start(|base_url| {
+            ResponseTable::new()
+                .with_directory(base_url)
+                .with_new_nonce("nonce-load-1") // lgtm[rust/hard-coded-cryptographic-value]
+        })
+        .await;
+
+        std::fs::write(&ca_path, server.ca_cert_pem()).expect("write ca cert");
+
+        // Pre-write valid credentials JSON.  The `directory` field causes
+        // `instant_acme` to re-fetch the directory on load (no stored URLs),
+        // which is the code path we want to exercise.
+        let creds_json = serde_json::json!({
+            "id": format!("{}/acme/acct/1", server.base_url()),
+            // A real ECDSA P-256 private key, taken from instant-acme's own test suite.
+            "key_pkcs8": "MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgJVWC_QzOTCS5vtsJp2IG-UDc8cdDfeoKtxSZxaznM-mhRANCAAQenCPoGgPFTdPJ7VLLKt56RxPlYT1wNXnHc54PEyBg3LxKaH0-sJkX0mL8LyPEdsfL_Oz4TxHkWLJGrXVtNhfH",
+            "directory": server.directory_uri()
+        });
+        std::fs::write(&account_path, serde_json::to_vec(&creds_json).unwrap())
+            .expect("write creds");
+
+        let result = load_or_create_account(
+            &server.directory_uri(),
+            "mailto:test@example.test",
+            &account_path,
+            Some(&ca_path),
+        )
+        .await;
+
+        assert!(result.is_ok(), "expected Ok, got error");
+        assert_eq!(
+            server.request_count("POST", "/acme/new-acct"),
+            0,
+            "must not create a new account when loading"
+        );
+        assert_eq!(
+            server.request_count("GET", "/directory"),
+            1,
+            "GET /directory once"
+        );
+    }
+
+    /// Load existing credentials when no network is needed.
+    /// Credentials use the legacy `urls` field (no `directory`), so
+    /// `Account::from_credentials` constructs the client without any HTTP
+    /// requests.  This exercises the `ca_file = None` load path.
+    #[tokio::test]
+    async fn load_or_create_account_loads_existing_no_network() {
+        install_ring();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let account_path = tmp.path().join("account.json");
+
+        // Credentials with `urls` only (no `directory`) — instant-acme
+        // uses the stored URLs directly and makes no network call on load.
+        let creds_json = serde_json::json!({
+            "id": "https://acme.example.invalid/acct/1",
+            "key_pkcs8": "MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgJVWC_QzOTCS5vtsJp2IG-UDc8cdDfeoKtxSZxaznM-mhRANCAAQenCPoGgPFTdPJ7VLLKt56RxPlYT1wNXnHc54PEyBg3LxKaH0-sJkX0mL8LyPEdsfL_Oz4TxHkWLJGrXVtNhfH",
+            "urls": {
+                "newNonce":   "https://acme.example.invalid/nonce",
+                "newAccount": "https://acme.example.invalid/new-acct",
+                "newOrder":   "https://acme.example.invalid/new-order",
+                "revokeCert": "https://acme.example.invalid/revoke"
+            }
+        });
+        std::fs::write(&account_path, serde_json::to_vec(&creds_json).unwrap())
+            .expect("write creds");
+
+        let result = load_or_create_account(
+            "https://acme.example.invalid/directory",
+            "mailto:test@example.test",
+            &account_path,
+            None,
+        )
+        .await;
+
+        assert!(result.is_ok(), "expected Ok, got error");
+    }
+
+    /// The ACME server returns 400 on new-account → expect a protocol error.
+    #[tokio::test]
+    async fn load_or_create_account_new_acct_returns_400() {
+        install_ring();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let account_path = tmp.path().join("account.json");
+        let ca_path = tmp.path().join("ca.pem");
+
+        let server = MockAcmeServer::start(|base_url| {
+            ResponseTable::new()
+                .with_directory(base_url)
+                .with_new_nonce("nonce-400-1") // lgtm[rust/hard-coded-cryptographic-value]
+                .with(
+                    "POST",
+                    "/acme/new-acct",
+                    CannedResponse {
+                        status: 400,
+                        headers: vec![(
+                            "content-type".into(),
+                            "application/problem+json".into(),
+                        )],
+                        body: br#"{"type":"urn:ietf:params:acme:error:malformed","detail":"bad request","status":400}"#
+                            .to_vec(),
+                    },
+                )
+        })
+        .await;
+
+        std::fs::write(&ca_path, server.ca_cert_pem()).expect("write ca cert");
+
+        let result = load_or_create_account(
+            &server.directory_uri(),
+            "mailto:test@example.test",
+            &account_path,
+            Some(&ca_path),
+        )
+        .await;
+
+        assert!(
+            matches!(result, Err(AcmeError::Protocol(_))),
+            "expected Protocol error, got non-Protocol result"
+        );
+    }
+
+    /// The ACME directory endpoint returns 404 → expect an error.
+    /// Covers the "wrong directory URL / server unreachable" path.
+    #[tokio::test]
+    async fn load_or_create_account_directory_returns_404() {
+        install_ring();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let account_path = tmp.path().join("account.json");
+        let ca_path = tmp.path().join("ca.pem");
+
+        // Start a server with no entries — all requests return 404.
+        let server = MockAcmeServer::start(|_base_url| ResponseTable::new()).await;
+
+        std::fs::write(&ca_path, server.ca_cert_pem()).expect("write ca cert");
+
+        let result = load_or_create_account(
+            &server.directory_uri(),
+            "mailto:test@example.test",
+            &account_path,
+            Some(&ca_path),
+        )
+        .await;
+
+        assert!(result.is_err(), "expected Err, got Ok");
+    }
+
+    /// Writing the credentials file fails (read-only parent directory).
+    /// Exercises the `write_atomic` error path.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn load_or_create_account_credentials_write_fails() {
+        use std::os::unix::fs::PermissionsExt;
+        install_ring();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let ca_path = tmp.path().join("ca.pem");
+
+        let server = MockAcmeServer::start(|base_url| {
+            ResponseTable::new()
+                .with_directory(base_url)
+                .with_new_nonce("nonce-write-fail") // lgtm[rust/hard-coded-cryptographic-value]
+                .with_new_account_success(&format!("{base_url}/acme/acct/1"))
+        })
+        .await;
+
+        std::fs::write(&ca_path, server.ca_cert_pem()).expect("write ca cert");
+
+        // Make a read-only directory so the credentials write fails.
+        let readonly_dir = tmp.path().join("readonly");
+        std::fs::create_dir_all(&readonly_dir).expect("create dir");
+        std::fs::set_permissions(&readonly_dir, std::fs::Permissions::from_mode(0o555))
+            .expect("set readonly");
+        let account_path = readonly_dir.join("account.json");
+
+        let result = load_or_create_account(
+            &server.directory_uri(),
+            "mailto:test@example.test",
+            &account_path,
+            Some(&ca_path),
+        )
+        .await;
+
+        // Restore permissions so tempdir cleanup succeeds.
+        std::fs::set_permissions(&readonly_dir, std::fs::Permissions::from_mode(0o755))
+            .expect("restore perms");
+
+        assert!(
+            matches!(result, Err(AcmeError::Io(_))),
+            "expected Io error, got non-Io result"
+        );
+    }
 }
