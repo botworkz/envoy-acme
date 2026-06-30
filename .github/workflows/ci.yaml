@@ -185,13 +185,14 @@ jobs:
     - name: HTTPS end-to-end request (both SANs)
       run: |
         set -euo pipefail
-        # Verify HTTPS works for a.example.test.
+        # toolshed-echo responds with a JSON echo; the configured hostname
+        # from /etc/echo.yaml is returned in the "hostname" field.
         RESP_A=$(curl -sSf \
           --cacert /tmp/pebble.root.pem \
           --resolve a.example.test:8443:127.0.0.1 \
           https://a.example.test:8443/)
         echo "Response (a.example.test): ${RESP_A}"
-        echo "${RESP_A}" | grep -q "hello from upstream"
+        echo "${RESP_A}" | grep -q '"hostname": "upstream"'
 
         # Verify HTTPS works for b.example.test (same cert, second SAN).
         RESP_B=$(curl -sSf \
@@ -199,7 +200,7 @@ jobs:
           --resolve b.example.test:8443:127.0.0.1 \
           https://b.example.test:8443/)
         echo "Response (b.example.test): ${RESP_B}"
-        echo "${RESP_B}" | grep -q "hello from upstream"
+        echo "${RESP_B}" | grep -q '"hostname": "upstream"'
 
         # Verify the cert presented on each SNI name contains both SANs.
         for NAME in a.example.test b.example.test; do
