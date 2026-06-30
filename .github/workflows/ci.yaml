@@ -228,7 +228,7 @@ jobs:
           echo "--- cert issuer / subject / SANs (from inline_string) ---"
           docker compose exec -T envoy sh -c \
             "awk '/-----BEGIN CERTIFICATE-----/,/-----END CERTIFICATE-----/' \
-             '${FILE}' | openssl x509 -noout -issuer -subject -ext subjectAltName 2>&1" || true
+             \"${FILE}\" | openssl x509 -noout -issuer -subject -ext subjectAltName 2>&1" || true
           echo "--- secret.yaml contents ---"
           docker compose exec -T envoy cat "${FILE}" 2>&1 || true
           echo

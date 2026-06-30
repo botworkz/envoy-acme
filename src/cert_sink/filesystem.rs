@@ -43,7 +43,10 @@ struct DataSource<'a> {
 }
 
 impl FilesystemSink {
-    /// Create a new `FilesystemSink` that writes files into `dir` using the specified `layout`.
+    /// Create a new `FilesystemSink` that writes files into `dir`.
+    ///
+    /// The `layout` parameter is accepted for API compatibility and is reserved for future use
+    /// (currently only one layout variant exists and the secret path format is fixed).
     pub fn new(dir: PathBuf, _layout: Layout) -> Self {
         Self { dir }
     }
