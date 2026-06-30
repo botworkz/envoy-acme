@@ -19,11 +19,7 @@ enum AuthorizationAction<'a> {
     /// Authorization is already valid; nothing to do for this domain.
     Skip,
     /// Authorization is pending; the caller must register this HTTP-01 challenge.
-    Register {
-        challenge: &'a Challenge,
-        #[allow(dead_code)]
-        domain: String,
-    },
+    Register { challenge: &'a Challenge },
 }
 
 /// Decision returned by `classify_poll_status` for each iteration of the
@@ -75,10 +71,7 @@ fn evaluate_authorization(authz: &Authorization) -> Result<AuthorizationAction<'
         .find(|c| c.r#type == ChallengeType::Http01)
         .ok_or_else(|| AcmeError::NoChallenge(domain.clone()))?;
 
-    Ok(AuthorizationAction::Register {
-        challenge,
-        domain: domain.clone(),
-    })
+    Ok(AuthorizationAction::Register { challenge })
 }
 
 /// Classify an `OrderStatus` seen during the readiness-polling loop.
@@ -141,7 +134,7 @@ pub async fn issue_certificate(
     for authz in &authorizations {
         match evaluate_authorization(authz)? {
             AuthorizationAction::Skip => continue,
-            AuthorizationAction::Register { challenge, .. } => {
+            AuthorizationAction::Register { challenge } => {
                 let key_auth = order.key_authorization(challenge).as_str().to_owned();
                 challenge_store::insert(challenge.token.clone(), key_auth);
                 challenge_tokens.push(challenge.token.clone());
@@ -258,8 +251,7 @@ mod tests {
         let authz = make_authz("pending", "example.test", &["http-01", "dns-01"]);
         let action = evaluate_authorization(&authz).expect("should succeed");
         match action {
-            AuthorizationAction::Register { challenge, domain } => {
-                assert_eq!(domain, "example.test");
+            AuthorizationAction::Register { challenge } => {
                 assert_eq!(challenge.r#type, ChallengeType::Http01);
             }
             AuthorizationAction::Skip => panic!("expected Register, got Skip"),
