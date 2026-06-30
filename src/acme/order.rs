@@ -562,4 +562,38 @@ mod tests {
             AcmeError::Protocol(instant_acme::Error::Str("certificate-error"))
         ));
     }
+
+    /// Order goes through Processing → Ready, requiring one sleep in the
+    /// readiness-polling loop.
+    #[tokio::test]
+    async fn issue_certificate_polling_eventually_ready() {
+        let account = MockAcmeAccount {
+            new_order_result: Mutex::new(Some(Ok(Box::new(MockAcmeOrder::with_statuses(vec![
+                OrderStatus::Processing,
+                OrderStatus::Ready,
+            ]))))),
+        };
+        let bundle = issue_certificate(&make_config(), &account)
+            .await
+            .expect("should succeed after polling");
+        assert_eq!(bundle.cert_pem, b"CERT-CHAIN".to_vec());
+    }
+
+    /// Certificate download returns None on the first poll and Some on the
+    /// second, so the sleep inside the certificate-download loop is exercised.
+    #[tokio::test]
+    async fn issue_certificate_certificate_polling_eventually_some() {
+        let mut order = MockAcmeOrder::with_statuses(vec![OrderStatus::Ready]);
+        order.certificate_responses = VecDeque::from([
+            Ok(None),                              // first poll: not yet available
+            Ok(Some("CERT-CHAIN".to_string())),    // second poll: ready
+        ]);
+        let account = MockAcmeAccount {
+            new_order_result: Mutex::new(Some(Ok(Box::new(order)))),
+        };
+        let bundle = issue_certificate(&make_config(), &account)
+            .await
+            .expect("should succeed on second certificate poll");
+        assert_eq!(bundle.cert_pem, b"CERT-CHAIN".to_vec());
+    }
 }

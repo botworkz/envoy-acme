@@ -196,7 +196,7 @@ impl RuntimeBridge {
     }
 
     #[cfg(test)]
-    fn panic_for_test(&self) -> Result<(), RuntimeError> {
+    pub(crate) fn panic_for_test(&self) -> Result<(), RuntimeError> {
         match self.tx.try_send(Command::PanicForTest) {
             Ok(()) => Ok(()),
             Err(_) => Err(RuntimeError::Stopped),
@@ -418,6 +418,125 @@ mod tests {
 
         runtime.shutdown().expect("shutdown should send");
         runtime.join_for_test();
+    }
+
+    /// After the runtime panics and the channel receiver is dropped, `start()`
+    /// must return `Err(RuntimeError::Stopped)` (the `TrySendError::Closed` arm).
+    #[test]
+    fn start_returns_stopped_after_panic() {
+        let runtime = RuntimeBridge::new(test_config());
+        assert!(wait_for(
+            Instant::now() + Duration::from_millis(200),
+            || runtime.is_alive()
+        ));
+
+        runtime.panic_for_test().expect("panic command should send");
+        assert!(wait_for(
+            Instant::now() + Duration::from_millis(500),
+            || !runtime.is_alive()
+        ));
+        runtime.join_for_test();
+
+        assert!(
+            matches!(runtime.start(), Err(RuntimeError::Stopped)),
+            "start() must return Stopped when runtime is dead"
+        );
+    }
+
+    /// After the runtime panics and the channel receiver is dropped, `shutdown()`
+    /// must return `Err(RuntimeError::Stopped)` (the `blocking_send` Err arm).
+    #[test]
+    fn shutdown_returns_stopped_after_panic() {
+        let runtime = RuntimeBridge::new(test_config());
+        assert!(wait_for(
+            Instant::now() + Duration::from_millis(200),
+            || runtime.is_alive()
+        ));
+
+        runtime.panic_for_test().expect("panic command should send");
+        assert!(wait_for(
+            Instant::now() + Duration::from_millis(500),
+            || !runtime.is_alive()
+        ));
+        runtime.join_for_test();
+
+        assert!(
+            matches!(runtime.shutdown(), Err(RuntimeError::Stopped)),
+            "shutdown() must return Stopped when runtime is dead"
+        );
+    }
+
+    /// `panic_message` must return `"<non-string panic payload>"` for non-String,
+    /// non-`&'static str` payloads (the else branch of the downcast chain).
+    #[test]
+    fn panic_message_non_string_payload() {
+        // Box<dyn Any + Send> holding an integer — neither &str nor String.
+        let payload: Box<dyn std::any::Any + Send> = Box::new(42i32);
+        let msg = super::panic_message(payload.as_ref());
+        assert_eq!(msg, "<non-string panic payload>");
+    }
+
+    /// When ticks are coalesced, the runtime thread later reads the drop counter
+    /// and emits a debug log (the `if dropped > 0` branch).  We verify this
+    /// branch executed by:
+    ///   1. Asserting the client-side counter is ≥ 1 immediately after a
+    ///      coalesced tick (the increment is synchronous on the calling thread).
+    ///   2. Calling shutdown() + join_for_test() so the runtime thread exits.
+    ///   3. Asserting the counter is 0 — the runtime thread swapped it during
+    ///      the `if dropped > 0` block.
+    ///
+    /// Note: logs_contain() cannot capture logs from the runtime thread (they
+    /// are emitted on a different thread and not attributed to the test span),
+    /// so we verify the branch via the observable AtomicUsize counter instead.
+    #[test]
+    fn dropped_tick_count_reset_by_runtime_thread() {
+        let _metrics_guard = crate::metrics::test_lock();
+        crate::metrics::reset_test_state();
+
+        let issuer = Box::new(SlowIssuer {
+            call_count: Arc::new(AtomicUsize::new(0)),
+            // 200 ms is long enough that tick 1 is still in flight when we send
+            // tick 3 (at ~30 ms), guaranteeing the channel is full.
+            delay: Duration::from_millis(200),
+        });
+
+        let runtime = RuntimeBridge::new_with_issuer(test_config(), issuer);
+        assert!(wait_for(
+            Instant::now() + Duration::from_millis(200),
+            || runtime.is_alive()
+        ));
+
+        // Tick 1: picked up by the runtime thread immediately.
+        runtime.tick().expect("first tick");
+        // Give the runtime thread a moment to dequeue tick 1 and start running.
+        std::thread::sleep(Duration::from_millis(30));
+        // Tick 2: goes into the capacity-1 buffer (tick 1 is still in flight).
+        runtime.tick().expect("second tick into buffer");
+        // Tick 3: buffer full → coalesced → client synchronously increments
+        // dropped_tick_count.
+        runtime.tick().expect("third tick coalesced");
+
+        // The increment was synchronous on the test thread; the counter must be
+        // ≥ 1 immediately (no wait required).
+        let count = runtime.dropped_tick_count.load(Ordering::Relaxed);
+        assert!(
+            count >= 1,
+            "dropped_tick_count should be ≥ 1 after a coalesced tick; got {count}"
+        );
+
+        // shutdown() blocks until blocking_send succeeds (after tick 1 finishes
+        // and tick 2 is dequeued).  join_for_test() waits for full exit.
+        // By the time join returns, the runtime thread has executed
+        // `if dropped > 0 { … }` for tick 1's completion and swapped the
+        // counter to 0.
+        runtime.shutdown().expect("shutdown should succeed");
+        runtime.join_for_test();
+
+        assert_eq!(
+            runtime.dropped_tick_count.load(Ordering::Relaxed),
+            0,
+            "runtime thread must have reset the drop counter (if dropped > 0 branch)"
+        );
     }
 
     /// `shutdown()` is never dropped even when `tick()` calls are flooding the
