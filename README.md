@@ -94,9 +94,31 @@ Notable config options in `acme:`:
   verbatim (equivalent to `custom`).
 
 - `directory_uri` (optional when a `staging` or `production` profile is set,
-  required otherwise): the ACME directory URL.  ACME directory traffic uses
-  the embedded HTTPS client (via `instant-acme`), not an Envoy cluster.
-  Cluster-routed ACME is not yet supported.
+  required otherwise): the ACME directory URL.  Must use `https://`.  ACME
+  directory traffic uses the embedded HTTPS client (via `instant-acme`), not
+  an Envoy cluster.  Cluster-routed ACME is not yet supported.
+
+- `allow_insecure_directory` (optional, default `false`): when `true`, permits
+  a plain-`http://` `directory_uri` for the `custom` profile.  **Security
+  warning:** nonces and credentials will traverse the network in cleartext.
+  Only intended for local integration-test environments (e.g. Pebble without
+  TLS).  This flag has no effect on `staging` or `production` profiles, which
+  always require `https://`.
+
+  Example — Pebble integration test with plain HTTP:
+  ```yaml
+  acme:
+    directory_profile: custom
+    directory_uri: http://pebble:14000/dir
+    allow_insecure_directory: true   # TEST ONLY – plain HTTP accepted
+    directory_ca_file: /etc/pebble/ca.pem
+    contact: mailto:admin@example.test
+    domains: [example.test]
+    state_dir: /var/lib/envoy-acme
+    cert_sink:
+      type: filesystem
+      cert_dir: /var/lib/envoy-acme/certs
+  ```
 
 - `directory_ca_file` (optional): path to a PEM CA bundle to trust when connecting to the ACME directory (e.g. Pebble's self-signed CA in integration tests). Omit to use the system native roots.
 - `tick_seconds` (default `60`): how often the renewal state machine timer fires. Set lower in integration environments.
