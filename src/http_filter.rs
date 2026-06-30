@@ -215,6 +215,7 @@ mod tests {
     fn normalize_host_ipv6_strips_large_port() {
         // Port with more than 4 digits — still all digits, so must be stripped.
         assert_eq!(normalize_host(b"[::1]:54321"), "[::1]");
+        assert_eq!(normalize_host(b"[2001:db8::1]:443"), "[2001:db8::1]");
     }
 
     #[test]

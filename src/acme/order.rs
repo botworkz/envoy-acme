@@ -137,7 +137,7 @@ pub async fn issue_certificate(
         match evaluate_authorization(authz)? {
             AuthorizationAction::Skip => continue,
             AuthorizationAction::Register { challenge } => {
-                let key_auth = order.key_authorization(challenge).as_str().to_owned();
+                let key_auth = order.key_authorization(challenge);
                 challenge_store::insert(challenge.token.clone(), key_auth);
                 challenge_tokens.push(challenge.token.clone());
                 order.set_challenge_ready(&challenge.url).await?;
@@ -194,24 +194,6 @@ mod tests {
     use std::collections::VecDeque;
     use std::sync::Mutex;
 
-    // ── Known test gap: Register branch of issue_certificate (lines 139-145) ──
-    //
-    // The Register branch (key_authorization → challenge_store::insert →
-    // set_challenge_ready) is NOT covered by unit tests because
-    // `instant_acme::KeyAuthorization` cannot be constructed from outside the
-    // crate:
-    //   - It has no public constructor.
-    //   - It does not implement `Deserialize` (no `#[derive(Deserialize)]`).
-    //   - The only factory is `Order::key_authorization`, which is the real SDK
-    //     method and requires a live ACME account key.
-    //
-    // Resolution: the Register branch is exercised by the Pebble integration job.
-    // Unit-test coverage requires an upstream instant-acme change (e.g. a
-    // `#[cfg(test)] pub fn new_for_test(s: String) -> Self` constructor, or a
-    // `Deserialize` impl). Until that lands, MockAcmeOrder::key_authorization
-    // panics to make any accidental call visible, and the branch stays uncovered
-    // in unit-test reports.
-
     // ── helpers for constructing Authorization fixtures via serde ──────────
 
     fn make_authz(status: &str, domain: &str, challenge_types: &[&str]) -> Authorization {
@@ -233,6 +215,27 @@ mod tests {
             "expires": "2099-01-01T00:00:00Z",
             "identifier": {"type": "dns", "value": domain},
             "challenges": challenges
+        });
+        serde_json::from_value(raw).expect("fixture must deserialise")
+    }
+
+    /// Like `make_authz`, but lets tests control the exact challenge token.
+    fn make_authz_with_token(
+        status: &str,
+        domain: &str,
+        challenge_type: &str,
+        token: &str,
+    ) -> Authorization {
+        let raw = serde_json::json!({
+            "status": status,
+            "expires": "2099-01-01T00:00:00Z",
+            "identifier": {"type": "dns", "value": domain},
+            "challenges": [{
+                "type": challenge_type,
+                "url": format!("https://acme.test/chal/{token}"),
+                "token": token,
+                "status": "pending"
+            }]
         });
         serde_json::from_value(raw).expect("fixture must deserialise")
     }
@@ -433,6 +436,7 @@ mod tests {
         refresh_state: OrderState,
         finalize_response: Option<Result<(), instant_acme::Error>>,
         certificate_responses: VecDeque<Result<Option<String>, instant_acme::Error>>,
+        key_auth_stash: String,
     }
 
     impl MockAcmeOrder {
@@ -449,7 +453,13 @@ mod tests {
                 },
                 finalize_response: Some(Ok(())),
                 certificate_responses: VecDeque::from([Ok(Some("CERT-CHAIN".to_string()))]),
+                key_auth_stash: "default-key-auth-for-tests".to_string(),
             }
+        }
+
+        fn with_key_auth(mut self, key_auth: &str) -> Self {
+            self.key_auth_stash = key_auth.to_string();
+            self
         }
     }
 
@@ -461,8 +471,8 @@ mod tests {
                 .expect("authorizations called once")
         }
 
-        fn key_authorization(&self, _challenge: &Challenge) -> instant_acme::KeyAuthorization {
-            panic!("key_authorization should not be called in these tests")
+        fn key_authorization(&self, _challenge: &Challenge) -> String {
+            self.key_auth_stash.clone()
         }
 
         async fn set_challenge_ready(&mut self, _url: &str) -> Result<(), instant_acme::Error> {
@@ -518,6 +528,59 @@ mod tests {
             .expect("issue_certificate should succeed");
         assert_eq!(bundle.cert_pem, b"CERT-CHAIN".to_vec());
         assert!(!bundle.key_pem.is_empty());
+    }
+
+    #[tokio::test]
+    async fn issue_certificate_register_branch_success_cleans_up_token() {
+        let token = "order-register-insert-token";
+        let key_auth = "order-register-insert-key-auth";
+
+        let authz = make_authz_with_token("pending", "example.test", "http-01", token);
+        let mut order = MockAcmeOrder::with_statuses(vec![OrderStatus::Ready]);
+        order.authorizations_response = Some(Ok(vec![authz]));
+        let order = order.with_key_auth(key_auth);
+
+        let account = MockAcmeAccount {
+            new_order_result: Mutex::new(Some(Ok(Box::new(order)))),
+        };
+
+        let bundle = issue_certificate(&make_config(), &account)
+            .await
+            .expect("should succeed");
+
+        assert_eq!(bundle.cert_pem, b"CERT-CHAIN".to_vec());
+        assert!(
+            challenge_store::lookup(token).is_none(),
+            "token should be removed after successful issuance"
+        );
+    }
+
+    #[tokio::test]
+    async fn issue_certificate_register_branch_not_ready_cleans_up_token() {
+        let token = "order-register-timeout-token";
+        let key_auth = "order-register-timeout-key-auth";
+
+        let authz = make_authz_with_token("pending", "example.test", "http-01", token);
+        let mut order = MockAcmeOrder::with_statuses(vec![OrderStatus::Invalid]);
+        order.authorizations_response = Some(Ok(vec![authz]));
+        let order = order.with_key_auth(key_auth);
+
+        let account = MockAcmeAccount {
+            new_order_result: Mutex::new(Some(Ok(Box::new(order)))),
+        };
+
+        let err = issue_certificate(&make_config(), &account)
+            .await
+            .expect_err("should fail with timeout waiting for ready authorization");
+
+        assert!(matches!(
+            err,
+            AcmeError::OrderFailed(ref msg) if msg.contains("timed out waiting for ready authorization")
+        ));
+        assert!(
+            challenge_store::lookup(token).is_none(),
+            "token should be removed after ready-timeout path"
+        );
     }
 
     #[tokio::test]
