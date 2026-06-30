@@ -324,6 +324,7 @@ dependencies = [
  "rustix 0.38.44",
  "rustls",
  "rustls-pemfile",
+ "scopeguard",
  "serde",
  "serde_json",
  "serde_yaml",
