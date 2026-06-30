@@ -327,6 +327,27 @@ impl AcmeStateMachine {
         match tokio::time::timeout(timeout, self.issuer.issue(&self.config)).await {
             Ok(Ok(bundle)) => {
                 let elapsed = issuance_started.elapsed();
+
+                // Validate the issued bundle before persisting or publishing.
+                // A CA returning wrong SANs or a mismatched key is treated as
+                // an issuance failure so the bad bundle is never served.
+                if let Err(e) = validate_bundle(&self.config, &bundle) {
+                    let reason = match &e {
+                        AcmeError::OrderFailed(msg) => msg.as_str(),
+                        _ => "bundle validation failed",
+                    };
+                    metrics::record_issuance_failure(domain, elapsed);
+                    error!(
+                        domain,
+                        reason, "issued bundle failed validation; treating as issuance failure"
+                    );
+                    metrics::set_consecutive_failures(domain, self.backoff.consecutive_failures);
+                    if emit_heartbeat {
+                        self.emit_heartbeat(now_unix, false);
+                    }
+                    return Err(e);
+                }
+
                 self.persist_bundle(&bundle).await?;
                 self.publish("issued", &bundle)?;
 
@@ -511,84 +532,21 @@ impl AcmeStateMachine {
             return Ok(None);
         }
 
-        // Validate SANs and extract the cert's SPKI DER for the key-consistency
-        // check below.  Both checks operate on the parsed certificate, so we do
-        // them inside a scope to satisfy the borrow checker (the parsed cert
-        // borrows from cert_pem).
-        let cert_spki_der: Vec<u8> = {
-            let (_, pem_doc) = x509_parser::pem::parse_x509_pem(&cert_pem)
-                .map_err(|e| AcmeError::OrderFailed(format!("cert.pem PEM parse failed: {e}")))?;
-            let cert = pem_doc
-                .parse_x509()
-                .map_err(|e| AcmeError::OrderFailed(format!("cert.pem X.509 parse failed: {e}")))?;
-
-            // ── SAN coverage ────────────────────────────────────────────────
-            let cert_dns_names: std::collections::HashSet<String> = cert
-                .subject_alternative_name()
-                .ok()
-                .flatten()
-                .map(|ext| {
-                    ext.value
-                        .general_names
-                        .iter()
-                        .filter_map(|gn| {
-                            if let x509_parser::extensions::GeneralName::DNSName(name) = gn {
-                                Some(name.to_lowercase())
-                            } else {
-                                None
-                            }
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
-
-            let configured_lc: Vec<String> = self
-                .config
-                .domains
-                .iter()
-                .map(|d| d.to_ascii_lowercase())
-                .collect();
-
-            let missing: Vec<&str> = configured_lc
-                .iter()
-                .zip(self.config.domains.iter())
-                .filter(|(lc, _)| !cert_dns_names.contains(lc.as_str()))
-                .map(|(_, orig)| orig.as_str())
-                .collect();
-
-            if !missing.is_empty() {
-                let reason = format!(
-                    "cert SANs missing configured domain(s): {}",
-                    missing.join(", ")
-                );
-                warn!(domain = %domain, reason = %reason, "cached bundle invalid; will re-issue");
-                return Ok(None);
-            }
-
-            // ── SPKI extraction (used for key consistency below) ─────────────
-            cert.subject_pki.raw.to_vec()
-        };
-
         let key_pem = tokio::fs::read(&key_path).await?;
+        let bundle = CertBundle { cert_pem, key_pem };
 
-        // ── Key↔cert consistency ─────────────────────────────────────────────
-        {
-            let key_str = std::str::from_utf8(&key_pem)
-                .map_err(|_| AcmeError::OrderFailed("key.pem is not valid UTF-8".into()))?;
-            let key_pair = rcgen::KeyPair::from_pem(key_str)
-                .map_err(|e| AcmeError::OrderFailed(format!("key.pem parse failed: {e}")))?;
-            if key_pair.public_key_der() != cert_spki_der {
-                warn!(
-                    domain = %domain,
-                    reason = "key.pem public key does not match cert.pem",
-                    "cached bundle invalid; will re-issue"
-                );
-                return Ok(None);
-            }
+        // Validate SANs and key↔cert consistency via the shared helper.
+        if let Err(e) = validate_bundle(&self.config, &bundle) {
+            let reason = match &e {
+                AcmeError::OrderFailed(msg) => msg.as_str(),
+                _ => "bundle validation failed",
+            };
+            warn!(domain = %domain, reason = %reason, "cached bundle invalid; will re-issue");
+            return Ok(None);
         }
 
-        let not_after = renewal::cert_not_after_unix(&cert_pem)?;
-        Ok(Some((CertBundle { cert_pem, key_pem }, not_after)))
+        let not_after = renewal::cert_not_after_unix(&bundle.cert_pem)?;
+        Ok(Some((bundle, not_after)))
     }
 
     async fn persist_bundle(&self, bundle: &CertBundle) -> Result<(), AcmeError> {
@@ -683,6 +641,86 @@ async fn persist_backoff(state_dir: &Path, state: &BackoffState) -> Result<(), A
     tokio::task::spawn_blocking(move || crate::atomic_write::write_atomic(&path, &bytes, false))
         .await
         .map_err(std::io::Error::other)??;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Bundle validation
+// ---------------------------------------------------------------------------
+
+/// Returns `Ok(())` if `bundle.cert_pem` covers every domain in
+/// `config.domains` and `bundle.key_pem` is mathematically paired with the
+/// cert's public key (SPKI).
+///
+/// Returns `Err(AcmeError::OrderFailed(reason))` on the first check that
+/// fails; the reason names the specific check so operators can distinguish a
+/// CA-side problem from a config-side one.
+fn validate_bundle(config: &AcmeConfig, bundle: &CertBundle) -> Result<(), AcmeError> {
+    // Parse the certificate once and extract SPKI DER for the key-consistency
+    // check below.  Both checks share a single parse.  The parsed cert borrows
+    // from the PEM document, so everything is scoped together.
+    let cert_spki_der: Vec<u8> = {
+        let (_, pem_doc) = x509_parser::pem::parse_x509_pem(&bundle.cert_pem)
+            .map_err(|e| AcmeError::OrderFailed(format!("cert.pem PEM parse failed: {e}")))?;
+        let cert = pem_doc
+            .parse_x509()
+            .map_err(|e| AcmeError::OrderFailed(format!("cert.pem X.509 parse failed: {e}")))?;
+
+        // ── SAN coverage ─────────────────────────────────────────────────────
+        let cert_dns_names: std::collections::HashSet<String> = cert
+            .subject_alternative_name()
+            .ok()
+            .flatten()
+            .map(|ext| {
+                ext.value
+                    .general_names
+                    .iter()
+                    .filter_map(|gn| {
+                        if let x509_parser::extensions::GeneralName::DNSName(name) = gn {
+                            Some(name.to_lowercase())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let configured_lc: Vec<String> = config
+            .domains
+            .iter()
+            .map(|d| d.to_ascii_lowercase())
+            .collect();
+
+        let missing: Vec<&str> = configured_lc
+            .iter()
+            .zip(config.domains.iter())
+            .filter(|(lc, _)| !cert_dns_names.contains(lc.as_str()))
+            .map(|(_, orig)| orig.as_str())
+            .collect();
+
+        if !missing.is_empty() {
+            return Err(AcmeError::OrderFailed(format!(
+                "cert SANs missing configured domain(s): {}",
+                missing.join(", ")
+            )));
+        }
+
+        // ── SPKI extraction (used for key-consistency check below) ────────────
+        cert.subject_pki.raw.to_vec()
+    };
+
+    // ── Key↔cert consistency ──────────────────────────────────────────────────
+    let key_str = std::str::from_utf8(&bundle.key_pem)
+        .map_err(|_| AcmeError::OrderFailed("key.pem is not valid UTF-8".into()))?;
+    let key_pair = rcgen::KeyPair::from_pem(key_str)
+        .map_err(|e| AcmeError::OrderFailed(format!("key.pem parse failed: {e}")))?;
+    if key_pair.public_key_der() != cert_spki_der {
+        return Err(AcmeError::OrderFailed(
+            "key.pem public key does not match cert.pem".into(),
+        ));
+    }
+
     Ok(())
 }
 
@@ -1523,7 +1561,7 @@ mod tests {
 
     #[traced_test]
     #[tokio::test]
-    async fn issuance_with_unparseable_cert_logs_and_succeeds() {
+    async fn issuance_with_unparseable_cert_fails_validation_and_returns_error() {
         let tmp = tempfile::tempdir().unwrap();
 
         struct DevNull;
@@ -1540,11 +1578,140 @@ mod tests {
         let mut sm =
             AcmeStateMachine::new_with_issuer(test_config(tmp.path()), Box::new(DevNull), issuer);
 
-        sm.tick_at(1_000_000).await.unwrap();
+        let err = sm.tick_at(1_000_000).await.unwrap_err();
 
-        assert!(logs_contain(
-            "unable to parse not_after from issued certificate"
-        ));
+        // Validation catches the bad bundle before persist/publish.
+        assert!(
+            matches!(err, AcmeError::OrderFailed(ref msg) if msg.contains("cert.pem")),
+            "expected OrderFailed about cert parse, got: {err:?}"
+        );
+        assert!(
+            logs_contain("issued bundle failed validation"),
+            "error log must mention validation failure"
+        );
+        // Nothing persisted.
+        assert!(
+            !tmp.path().join(CERT_FILE).exists(),
+            "cert.pem must not be written for an invalid bundle"
+        );
+    }
+
+    /// A MockIssuer returning a bundle whose cert SANs are missing a configured
+    /// domain must cause `tick_at` to return `Err(AcmeError::OrderFailed(_))`
+    /// naming the missing domain, and must not persist or publish anything.
+    #[traced_test]
+    #[tokio::test]
+    async fn tick_at_rejects_bundle_with_missing_san() {
+        let tmp = tempfile::tempdir().unwrap();
+        let now_unix = 1_000_000i64;
+
+        // Config requires two domains; cert only covers one.
+        let mut cfg = test_config(tmp.path());
+        cfg.domains = vec!["a.example.test".into(), "b.example.test".into()];
+
+        let not_after = now_unix + 90 * 86_400;
+        let (cert_pem, key_pem) = generate_cert(not_after, &["a.example.test"]);
+
+        let sink = std::sync::Arc::new(MockCertSink::default());
+
+        struct ArcSink(std::sync::Arc<MockCertSink>);
+        impl CertSink for ArcSink {
+            fn publish(&self, name: &str, bundle: &CertBundle) -> Result<(), SinkError> {
+                self.0.publish(name, bundle)
+            }
+        }
+
+        let issuer = Box::new(MockIssuer::with_results(vec![Ok(CertBundle {
+            cert_pem,
+            key_pem,
+        })]));
+        let mut sm =
+            AcmeStateMachine::new_with_issuer(cfg, Box::new(ArcSink(sink.clone())), issuer);
+
+        let err = sm.tick_at(now_unix).await.unwrap_err();
+
+        assert!(
+            matches!(err, AcmeError::OrderFailed(ref msg) if msg.contains("b.example.test")),
+            "error must name the missing domain, got: {err:?}"
+        );
+        assert!(
+            logs_contain("issued bundle failed validation"),
+            "error log must mention validation failure"
+        );
+        // Nothing persisted.
+        assert!(
+            !tmp.path().join(CERT_FILE).exists(),
+            "cert.pem must not be written for a bundle with missing SANs"
+        );
+        assert!(
+            !tmp.path().join(SENTINEL_FILE).exists(),
+            "sentinel must not be written for a bundle with missing SANs"
+        );
+        // Sink not called.
+        assert_eq!(
+            sink.call_count(),
+            0,
+            "sink must not be called for a bundle with missing SANs"
+        );
+    }
+
+    /// A MockIssuer returning a bundle whose `key_pem` does not match
+    /// `cert_pem` must cause `tick_at` to return `Err(AcmeError::OrderFailed(_))`
+    /// describing the key mismatch, and must not persist or publish anything.
+    #[traced_test]
+    #[tokio::test]
+    async fn tick_at_rejects_bundle_with_mismatched_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        let now_unix = 1_000_000i64;
+
+        let not_after = now_unix + 90 * 86_400;
+        let (cert_pem, _) = generate_cert(not_after, &["a.example.test"]);
+        let (_, mismatched_key_pem) = generate_cert(not_after, &["a.example.test"]);
+
+        let sink = std::sync::Arc::new(MockCertSink::default());
+
+        struct ArcSink(std::sync::Arc<MockCertSink>);
+        impl CertSink for ArcSink {
+            fn publish(&self, name: &str, bundle: &CertBundle) -> Result<(), SinkError> {
+                self.0.publish(name, bundle)
+            }
+        }
+
+        let issuer = Box::new(MockIssuer::with_results(vec![Ok(CertBundle {
+            cert_pem,
+            key_pem: mismatched_key_pem,
+        })]));
+        let mut sm = AcmeStateMachine::new_with_issuer(
+            test_config(tmp.path()),
+            Box::new(ArcSink(sink.clone())),
+            issuer,
+        );
+
+        let err = sm.tick_at(now_unix).await.unwrap_err();
+
+        assert!(
+            matches!(err, AcmeError::OrderFailed(ref msg) if msg.contains("does not match")),
+            "error must describe the key mismatch, got: {err:?}"
+        );
+        assert!(
+            logs_contain("issued bundle failed validation"),
+            "error log must mention validation failure"
+        );
+        // Nothing persisted.
+        assert!(
+            !tmp.path().join(CERT_FILE).exists(),
+            "cert.pem must not be written for a bundle with a mismatched key"
+        );
+        assert!(
+            !tmp.path().join(SENTINEL_FILE).exists(),
+            "sentinel must not be written for a bundle with a mismatched key"
+        );
+        // Sink not called.
+        assert_eq!(
+            sink.call_count(),
+            0,
+            "sink must not be called for a bundle with a mismatched key"
+        );
     }
 
     #[allow(clippy::await_holding_lock)]
