@@ -1,4 +1,5 @@
 //! Configuration types for envoy-acme, parsed from JSON or YAML bytes at bootstrap.
+use idna::Config as IdnaConfig;
 use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -181,32 +182,22 @@ impl TryFrom<RawAcmeConfig> for AcmeConfig {
         if raw.domains.is_empty() {
             return Err("acme.domains must contain at least one domain".to_string());
         }
-        for (i, value) in raw.domains.iter().enumerate() {
-            // Wildcard domains are the only domain-syntax footgun we reject
-            // explicitly: they require dns-01 challenges, which this module
-            // does not implement. Issuance would silently fail at the first
-            // tick with an opaque CA error; rejecting up front gives the
-            // operator a clear message at config-load time.
-            //
-            // Other RFC-1035 / IDN / CA-policy concerns (consecutive dots,
-            // leading/trailing hyphens, trailing dots, case, etc.) are not
-            // validated here — they are a rathole, and the CA will return a
-            // structured error if the domain is malformed.
-            let reason = if value.is_empty() {
-                "must be non-empty"
-            } else if value.starts_with("*.") {
-                "wildcards are not supported (http-01 challenges only)"
-            } else if value.starts_with('.') {
-                "must not start with '.'"
-            } else if value.chars().any(char::is_whitespace) {
-                "must not contain whitespace"
-            } else {
-                continue;
-            };
-            return Err(format!(
-                "acme.domains[{i}]: invalid domain {value:?}: {reason}"
-            ));
-        }
+
+        // Normalise every domain to its A-label (Punycode) form per RFC 5890 /
+        // UTS#46 nontransitional, matching the CA/Browser Forum Baseline
+        // Requirements profile used by Let's Encrypt and other modern CAs.
+        // Operators may write U-labels (e.g. `münchen.example`) or A-labels
+        // (e.g. `xn--mnchen-3ya.example`); we normalise to A-labels at the
+        // config boundary so every downstream path (CSR SANs, SAN-coverage
+        // checks, HTTP-01 host comparisons) sees the wire form the CA uses.
+        let idna = idna_config();
+
+        let normalised_domains: Vec<String> = raw
+            .domains
+            .iter()
+            .enumerate()
+            .map(|(i, value)| normalise_domain(&idna, i, value))
+            .collect::<Result<Vec<_>, _>>()?;
 
         if raw.contact.trim().is_empty() {
             return Err("acme.contact must be non-empty".to_string());
@@ -231,7 +222,7 @@ impl TryFrom<RawAcmeConfig> for AcmeConfig {
             directory_uri,
             directory_ca_file: raw.directory_ca_file,
             contact: raw.contact,
-            domains: raw.domains,
+            domains: normalised_domains,
             renewal_window_days: raw.renewal_window_days,
             state_dir: raw.state_dir,
             cert_sink: raw.cert_sink,
@@ -366,6 +357,54 @@ fn default_issuance_timeout_seconds() -> u64 {
 
 fn default_log_level() -> String {
     "info".to_string()
+}
+
+/// Returns the IDNA processing configuration used for domain normalisation.
+///
+/// Settings: UTS#46 nontransitional, STD3 ASCII rules enabled, DNS length
+/// verification enabled.  This matches the CA/Browser Forum Baseline
+/// Requirements profile implemented by Let's Encrypt and other modern CAs.
+fn idna_config() -> IdnaConfig {
+    IdnaConfig::default()
+        .use_std3_ascii_rules(true)
+        .transitional_processing(false)
+        .verify_dns_length(true)
+}
+
+/// Normalise a single domain entry to its IDNA A-label form.
+///
+/// Fast-fails on structural issues (empty, wildcard, leading-dot, whitespace)
+/// before delegating the heavy lifting to `idna::Config::to_ascii`, which
+/// handles both U-label→A-label conversion and A-label round-trip validation.
+/// The function is idempotent on already-A-label input.
+fn normalise_domain(idna: &IdnaConfig, i: usize, value: &str) -> Result<String, String> {
+    let reason = if value.is_empty() {
+        Some("must be non-empty")
+    } else if value.starts_with("*.") {
+        Some("wildcards are not supported (http-01 challenges only)")
+    } else if value.starts_with('.') {
+        Some("must not start with '.'")
+    } else if value.chars().any(char::is_whitespace) {
+        Some("must not contain whitespace")
+    } else {
+        None
+    };
+    if let Some(reason) = reason {
+        return Err(format!(
+            "acme.domains[{i}]: invalid domain {value:?}: {reason}"
+        ));
+    }
+
+    // The bulk of the work: U-label or A-label or plain ASCII → A-label.
+    // to_ascii is idempotent on already-A-label input.
+    // IdnaConfig is Copy so dereferencing here copies the small config struct.
+    (*idna).to_ascii(value).map_err(|e| {
+        format!(
+            "acme.domains[{i}]: invalid domain {value:?}: \
+             IDNA normalisation failed ({e:?}); expected an RFC 1035 / 5890 \
+             domain (U-labels accepted, will be normalised to Punycode A-labels)"
+        )
+    })
 }
 
 impl Config {
@@ -980,6 +1019,122 @@ aceme:
         assert!(
             msg.contains("s3_bucket"),
             "error should name the unknown field, got: {msg}"
+        );
+    }
+
+    // ── IDNA / IDN normalisation ──────────────────────────────────────────────
+
+    // U-label input is normalised to A-label (Punycode) form.
+    #[test]
+    fn idn_u_label_normalises_to_a_label() {
+        let raw = base_yaml("directory_uri: https://example.invalid/directory")
+            .replace("domains: [example.test]", "domains: [münchen.example]");
+        let cfg = Config::from_bytes(raw.as_bytes()).expect("U-label should parse");
+        assert_eq!(
+            cfg.acme.domains[0], "xn--mnchen-3ya.example",
+            "U-label must be normalised to A-label"
+        );
+    }
+
+    // A-label input passes through unchanged (idempotence).
+    #[test]
+    fn idn_a_label_passes_through_unchanged() {
+        let raw = base_yaml("directory_uri: https://example.invalid/directory").replace(
+            "domains: [example.test]",
+            "domains: [xn--mnchen-3ya.example]",
+        );
+        let cfg = Config::from_bytes(raw.as_bytes()).expect("A-label should parse");
+        assert_eq!(
+            cfg.acme.domains[0], "xn--mnchen-3ya.example",
+            "A-label must be unchanged"
+        );
+    }
+
+    // Mixed unicode subdomain is normalised correctly.
+    #[test]
+    fn idn_mixed_unicode_subdomain_normalises() {
+        // api.müller.test → api.xn--mller-kva.test
+        let raw = base_yaml("directory_uri: https://example.invalid/directory")
+            .replace("domains: [example.test]", "domains: [api.müller.test]");
+        let cfg = Config::from_bytes(raw.as_bytes()).expect("mixed IDN subdomain should parse");
+        assert_eq!(
+            cfg.acme.domains[0], "api.xn--mller-kva.test",
+            "mixed IDN subdomain must be normalised to A-label"
+        );
+    }
+
+    // Plain ASCII domain is left completely unchanged.
+    #[test]
+    fn idn_ascii_unchanged() {
+        let raw = base_yaml("directory_uri: https://example.invalid/directory");
+        let cfg = Config::from_bytes(raw.as_bytes()).expect("plain ASCII should parse");
+        assert_eq!(
+            cfg.acme.domains[0], "example.test",
+            "plain ASCII domain must be unchanged"
+        );
+    }
+
+    // A mixed list of U-labels, A-labels, and plain ASCII is each independently normalised.
+    #[test]
+    fn idn_mixed_list_normalises_each_independently() {
+        let raw = base_yaml("directory_uri: https://example.invalid/directory").replace(
+            "domains: [example.test]",
+            "domains: [example.test, münchen.example, xn--bcher-kva.example]",
+        );
+        let cfg = Config::from_bytes(raw.as_bytes()).expect("mixed domain list should parse");
+        assert_eq!(cfg.acme.domains[0], "example.test");
+        assert_eq!(cfg.acme.domains[1], "xn--mnchen-3ya.example");
+        assert_eq!(cfg.acme.domains[2], "xn--bcher-kva.example");
+    }
+
+    // Characters disallowed by UTS#46 nontransitional produce an IDNA error.
+    #[test]
+    fn idn_rejects_invalid_unicode() {
+        // Underscore (U+005F) is `DisallowedStd3Valid` in UTS#46: disallowed
+        // when `use_std3_ascii_rules=true` (our setting), which matches the
+        // CA/Browser Forum BR profile.
+        let raw = base_yaml("directory_uri: https://example.invalid/directory")
+            .replace("domains: [example.test]", "domains: [_foo.example]");
+        let err = Config::from_bytes(raw.as_bytes())
+            .expect_err("domain with underscore label should fail IDNA std3 rules");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("domains[0]") && msg.contains("IDNA"),
+            "error should mention the index and IDNA, got: {msg}"
+        );
+    }
+
+    // A single label longer than 63 octets after normalisation is rejected.
+    #[test]
+    fn idn_rejects_label_too_long() {
+        let long_label = "a".repeat(64);
+        let raw = base_yaml("directory_uri: https://example.invalid/directory").replace(
+            "domains: [example.test]",
+            &format!("domains: [{long_label}.example]"),
+        );
+        let err = Config::from_bytes(raw.as_bytes())
+            .expect_err("64-char label should fail IDNA length check");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("domains[0]") && msg.contains("IDNA"),
+            "error should mention the index and IDNA, got: {msg}"
+        );
+    }
+
+    // A total domain name longer than 253 octets is rejected.
+    #[test]
+    fn idn_rejects_total_too_long() {
+        // 5 labels of 50 chars each = 255 octets with dots — over the 253 limit.
+        let label = "a".repeat(50);
+        let domain = format!("{label}.{label}.{label}.{label}.{label}");
+        let raw = base_yaml("directory_uri: https://example.invalid/directory")
+            .replace("domains: [example.test]", &format!("domains: [{domain}]"));
+        let err = Config::from_bytes(raw.as_bytes())
+            .expect_err("253+ char domain should fail IDNA length check");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("domains[0]") && msg.contains("IDNA"),
+            "error should mention the index and IDNA, got: {msg}"
         );
     }
 }

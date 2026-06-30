@@ -129,6 +129,7 @@ Notable config options in `acme:`:
 
 - `directory_ca_file` (optional): path to a PEM CA bundle to trust when connecting to the ACME directory (e.g. Pebble's self-signed CA in integration tests). Omit to use the system native roots.
 - `tick_seconds` (default `60`): how often the renewal state machine timer fires. Set lower in integration environments.
+- `acme.domains`: list of hostnames for which TLS certificates should be issued. Accepts internationalised domain names (IDNs) in either Unicode (U-label, e.g. `münchen.example`) or Punycode (A-label, e.g. `xn--mnchen-3ya.example`) form. Inputs are normalised to A-label form per RFC 5890 / UTS#46 nontransitional, matching the CA/Browser Forum Baseline Requirements profile used by Let's Encrypt and other modern CAs. The normalised A-label is what appears in metrics, logs, and on-disk filenames (e.g. `xn--mnchen-3ya.example.cert.pem`).
 
 ## HTTP filter config (`filter_config`)
 
