@@ -1,3 +1,4 @@
+//! ACME account credential management: loading existing credentials or registering a new account.
 use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
@@ -122,6 +123,7 @@ fn build_custom_client(ca_path: &Path) -> Result<Box<dyn HttpClient>, AcmeError>
     Ok(Box::new(WithUserAgent(Box::new(client))))
 }
 
+/// Load an existing ACME account from `path`, or create and persist a new one if the file is absent.
 pub async fn load_or_create_account(
     directory_uri: &str,
     contact: &str,

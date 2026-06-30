@@ -1,3 +1,4 @@
+//! ACME order submission, HTTP-01 challenge registration, and certificate issuance.
 use instant_acme::{
     Authorization, AuthorizationStatus, Challenge, ChallengeType, Identifier, NewOrder, OrderStatus,
 };
@@ -116,6 +117,7 @@ fn assemble_bundle(
 // TODO(sdk): envoy bootstrap send_http_callout exists, but instant-acme currently owns request
 // formatting/signing and transport lifecycle. v0 keeps instant-acme's client on a dedicated runtime
 // thread and uses the in-process HTTP filter for HTTP-01 challenge responses.
+/// Submit an ACME order for all domains in `config`, respond to HTTP-01 challenges, and return the issued [`CertBundle`].
 pub async fn issue_certificate(
     config: &AcmeConfig,
     account: &dyn AcmeAccount,

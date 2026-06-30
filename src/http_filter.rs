@@ -1,3 +1,4 @@
+//! HTTP filter that intercepts ACME HTTP-01 challenge requests and serves stored key-authorizations.
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -11,6 +12,7 @@ const CONTENT_TYPE: &[u8] = b"application/octet-stream";
 const NOT_FOUND: &[u8] = b"acme challenge not found";
 const MAX_TOKEN_LEN: usize = 256;
 
+/// Envoy HTTP filter config that serves ACME HTTP-01 challenge responses for configured domains.
 pub struct AcmeHttpFilterConfig {
     domains: Arc<HashSet<String>>,
 }
