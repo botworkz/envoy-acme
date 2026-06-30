@@ -16,6 +16,7 @@ coverage:
 	cargo tarpaulin \
 		--workspace \
 		--timeout 180 \
+		--fail-under 60 \
 		--out Html \
 		--output-dir target/tarpaulin \
 		--skip-clean

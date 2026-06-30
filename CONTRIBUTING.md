@@ -19,6 +19,12 @@ make coverage
 
 The HTML report is written to `target/tarpaulin/tarpaulin-report.html`.
 Coverage is currently unit-test only; the docker compose / Envoy integration flow is not instrumented.
+CI enforces a minimum overall line coverage of **60%** via
+`cargo tarpaulin --fail-under 60`. This is a floor, not a ratchet: PRs that
+drop coverage below the floor will fail, but drops that stay above it are
+allowed. The floor is intentionally set slightly below current coverage to
+absorb trivial line-count churn, and is raised manually in dedicated PRs as new
+tests land.
 
 ## End-to-end stack
 
