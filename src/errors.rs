@@ -34,6 +34,8 @@ pub enum AcmeError {
     Sink(#[from] SinkError),
     #[error("missing http-01 challenge for domain: {0}")]
     NoChallenge(String),
+    #[error("issuance timed out")]
+    Timeout,
 }
 
 #[derive(Debug, Error)]

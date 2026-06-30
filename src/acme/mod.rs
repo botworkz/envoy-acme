@@ -5,7 +5,7 @@ pub mod renewal;
 
 use std::path::Path;
 use std::pin::Pin;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
 use tracing::{debug, error, info, instrument, warn};
@@ -286,8 +286,9 @@ impl AcmeStateMachine {
 
         // ── Certificate issuance ─────────────────────────────────────────
         let issuance_started = Instant::now();
-        match self.issuer.issue(&self.config).await {
-            Ok(bundle) => {
+        let timeout = Duration::from_secs(self.config.issuance_timeout_seconds);
+        match tokio::time::timeout(timeout, self.issuer.issue(&self.config)).await {
+            Ok(Ok(bundle)) => {
                 let elapsed = issuance_started.elapsed();
                 self.persist_bundle(&bundle).await?;
                 self.publish("issued", &bundle)?;
@@ -315,7 +316,7 @@ impl AcmeStateMachine {
                 }
                 Ok(())
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 let elapsed = issuance_started.elapsed();
                 metrics::record_issuance_failure(domain, elapsed);
                 if matches!(
@@ -342,6 +343,20 @@ impl AcmeStateMachine {
                 // Non-rate-limit errors propagate as-is; the caller logs them
                 // and retries on the next ordinary tick interval.
                 Err(e)
+            }
+            Err(_elapsed) => {
+                let elapsed = issuance_started.elapsed();
+                metrics::record_issuance_failure(domain, elapsed);
+                metrics::set_consecutive_failures(domain, self.backoff.consecutive_failures);
+                warn!(
+                    domain,
+                    timeout_seconds = self.config.issuance_timeout_seconds,
+                    "issuance exceeded timeout; will retry next tick"
+                );
+                if emit_heartbeat {
+                    self.emit_heartbeat(now_unix, false);
+                }
+                Err(AcmeError::Timeout)
             }
         }
     }
@@ -611,6 +626,7 @@ mod tests {
                 layout: Layout::PerDomain,
             },
             tick_seconds: 60,
+            issuance_timeout_seconds: 120,
         }
     }
 
@@ -1750,5 +1766,87 @@ mod tests {
             "envoy_acme_cert_not_after_seconds:a.example.test:{}",
             not_after
         )));
+    }
+
+    // ── Issuance timeout ────────────────────────────────────────────────────
+
+    /// A `MockIssuer` whose `issue` future never resolves.
+    struct HangingIssuer;
+
+    impl Issuer for HangingIssuer {
+        fn issue<'a>(
+            &'a self,
+            _config: &'a AcmeConfig,
+        ) -> Pin<Box<dyn std::future::Future<Output = Result<CertBundle, AcmeError>> + Send + 'a>>
+        {
+            Box::pin(std::future::pending())
+        }
+    }
+
+    /// tick_at returns AcmeError::Timeout when the issuer hangs forever.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn issuance_timeout_returns_timeout_error() {
+        // Hold the metrics lock so metric updates stay isolated.
+        let _guard = crate::metrics::test_lock();
+        crate::metrics::reset_test_state();
+
+        let tmp = tempfile::tempdir().unwrap();
+
+        struct DevNull;
+        impl CertSink for DevNull {
+            fn publish(&self, _: &str, _: &CertBundle) -> Result<(), SinkError> {
+                Ok(())
+            }
+        }
+
+        let mut cfg = test_config(tmp.path());
+        // Use a very short timeout so the test finishes quickly.
+        cfg.issuance_timeout_seconds = 5;
+
+        let mut sm =
+            AcmeStateMachine::new_with_issuer(cfg, Box::new(DevNull), Box::new(HangingIssuer));
+
+        let err = sm.tick_at(1_000_000).await.unwrap_err();
+        assert!(
+            matches!(err, AcmeError::Timeout),
+            "expected AcmeError::Timeout, got {err:?}"
+        );
+    }
+
+    /// A timeout records a failure metric but does not escalate backoff.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn issuance_timeout_records_failure_metric_and_no_backoff_escalation() {
+        let _guard = crate::metrics::test_lock();
+        crate::metrics::reset_test_state();
+
+        let tmp = tempfile::tempdir().unwrap();
+
+        struct DevNull;
+        impl CertSink for DevNull {
+            fn publish(&self, _: &str, _: &CertBundle) -> Result<(), SinkError> {
+                Ok(())
+            }
+        }
+
+        let mut cfg = test_config(tmp.path());
+        cfg.issuance_timeout_seconds = 5;
+
+        let mut sm =
+            AcmeStateMachine::new_with_issuer(cfg, Box::new(DevNull), Box::new(HangingIssuer));
+
+        let _ = sm.tick_at(1_000_000).await;
+
+        // Backoff must not have escalated.
+        assert_eq!(sm.backoff, BackoffState::default());
+        assert!(!tmp.path().join(BACKOFF_FILE).exists());
+
+        // A failure counter increment must have been recorded.
+        let metrics: HashSet<_> = crate::metrics::take_test_updates().into_iter().collect();
+        assert!(
+            metrics.contains("envoy_acme_issuance_total:failure"),
+            "expected failure metric; got {metrics:?}"
+        );
     }
 }

@@ -189,6 +189,7 @@ mod tests {
                     layout: Layout::PerDomain,
                 },
                 tick_seconds: 60,
+                issuance_timeout_seconds: 120,
             },
             log: LogConfig::default(),
         }
