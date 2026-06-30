@@ -1,6 +1,14 @@
+//! Metrics module for envoy-acme.
+//!
+//! All internal locks use [`parking_lot::Mutex`], which is poison-immune: a
+//! thread panic while holding the lock does not propagate `PoisonError` to
+//! subsequent lock acquisitions on other threads.
+
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
+
+use parking_lot::Mutex;
 
 use envoy_proxy_dynamic_modules_rust_sdk::abi::envoy_dynamic_module_type_metrics_result;
 use envoy_proxy_dynamic_modules_rust_sdk::bootstrap::EnvoyBootstrapExtensionConfigScheduler;
@@ -82,7 +90,7 @@ pub(crate) fn init(
         pending: Mutex::new(VecDeque::new()),
     });
 
-    *metrics_state().lock().unwrap() = Some(state);
+    *metrics_state().lock() = Some(state);
     Ok(())
 }
 
@@ -96,7 +104,7 @@ pub(crate) fn on_scheduled(envoy_config: &mut dyn EnvoyBootstrapExtensionConfig,
     };
 
     let updates: Vec<_> = {
-        let mut pending = state.pending.lock().unwrap();
+        let mut pending = state.pending.lock();
         pending.drain(..).collect()
     };
 
@@ -186,7 +194,7 @@ fn enqueue_many(updates: Vec<MetricUpdate>) {
     };
 
     {
-        let mut pending = state.pending.lock().unwrap();
+        let mut pending = state.pending.lock();
         for update in updates {
             // Coalesce gauges: a later set for the same (kind, domain) tuple
             // fully supersedes an earlier one for dashboard purposes, so we
@@ -204,7 +212,7 @@ fn enqueue_many(updates: Vec<MetricUpdate>) {
 }
 
 fn current_state() -> Option<Arc<MetricsState>> {
-    metrics_state().lock().unwrap().clone()
+    metrics_state().lock().clone()
 }
 
 fn apply_update(
@@ -288,7 +296,7 @@ fn record_test_updates(updates: &[MetricUpdate]) {
 
 #[cfg(test)]
 pub(crate) fn reset_test_state() {
-    *metrics_state().lock().unwrap() = None;
+    *metrics_state().lock() = None;
     TEST_UPDATES.with(|cell| cell.borrow_mut().clear());
 }
 
@@ -336,9 +344,9 @@ pub(crate) fn take_test_updates() -> Vec<String> {
 /// thread — no lock is needed and contamination from concurrent tests on other
 /// threads is structurally impossible.
 #[cfg(test)]
-pub(crate) fn test_lock() -> std::sync::MutexGuard<'static, ()> {
+pub(crate) fn test_lock() -> parking_lot::MutexGuard<'static, ()> {
     static TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    TEST_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+    TEST_LOCK.get_or_init(|| Mutex::new(())).lock()
 }
 
 #[cfg(test)]
@@ -697,5 +705,47 @@ mod tests {
             q.push_back(u);
         }
         assert_eq!(q.len(), 4);
+    }
+
+    // ── poison-immunity: runtime-thread panic must not cascade to caller ───────
+
+    #[test]
+    fn poisoned_lock_does_not_cascade_to_callback_thread() {
+        let _guard = test_lock();
+        reset_test_state();
+
+        // Initialise metrics state so enqueue_many and on_scheduled have a
+        // live state to work with (1 commit expected from record_issuance_success).
+        let mut init_cfg = make_init_mock(1);
+        init(&mut init_cfg).unwrap();
+
+        // Spawn a thread that acquires the outer metrics-state lock and then
+        // panics while holding it. With `std::sync::Mutex` this would poison
+        // the lock; with `parking_lot::Mutex` it does not.
+        let handle = std::thread::spawn(|| {
+            let _lock = metrics_state().lock();
+            panic!("intentional panic while holding metrics lock");
+        });
+
+        // The spawned thread should have panicked; its join handle returns Err.
+        assert!(
+            handle.join().is_err(),
+            "expected the spawned thread to have panicked"
+        );
+
+        // After the panic the lock must be acquirable again. The following
+        // calls must NOT panic — with parking_lot::Mutex poison is not
+        // propagated to this thread.
+        record_issuance_success("d.example", Duration::from_secs(1));
+
+        let mut cfg2 = MockEnvoyBootstrapExtensionConfig::new();
+        cfg2.expect_increment_counter_vec()
+            .once()
+            .returning(|_, _, _| Ok(()));
+        cfg2.expect_record_histogram_value()
+            .once()
+            .returning(|_, _| Ok(()));
+
+        on_scheduled(&mut cfg2, METRICS_EVENT_ID);
     }
 }
