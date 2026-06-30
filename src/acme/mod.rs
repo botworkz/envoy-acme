@@ -158,9 +158,7 @@ impl Issuer for RealIssuer {
             )
             .await?;
             let account_client = client::RealAcmeAccount(&account);
-            // Only reachable via the Pebble integration-test job; unit tests
-            // cannot reach this code without a live ACME server (SDK-blocked,
-            // bucket 3).
+            // SDK-blocked: only reachable via the Pebble integration-test job.
             order::issue_certificate(config, &account_client).await
         })
     }
@@ -343,9 +341,7 @@ impl AcmeStateMachine {
                 if let Err(e) = validate_bundle(&self.config, &bundle) {
                     let reason = match &e {
                         AcmeError::OrderFailed(msg) => msg.as_str(),
-                        // Dead arm by contract: `validate_bundle` only returns
-                        // `AcmeError::OrderFailed`; this wildcard is a safety net
-                        // in case a future refactor widens the error set (bucket 2).
+                        // Safety net: validate_bundle only returns OrderFailed.
                         _ => "bundle validation failed",
                     };
                     metrics::record_issuance_failure(domain, elapsed);
@@ -370,11 +366,8 @@ impl AcmeStateMachine {
                             metrics::set_cert_not_after(domain, not_after_unix);
                         }
                     }
-                // Defensive: the cert just passed `validate_bundle`, which fully
-                // parses the PEM, so a second parse here should never fail.  If it
-                // somehow does (e.g. memory corruption), log and continue rather
-                // than silently losing the not_after data (bucket 2).
-                Err(e) => error!(%e, "unable to parse not_after from issued certificate"),
+                    // Defensive: cert just passed validate_bundle so this parse should not fail.
+                    Err(e) => error!(%e, "unable to parse not_after from issued certificate"),
                 }
                 self.last_renewal_at_unix = u64::try_from(now_unix).ok();
 
@@ -560,9 +553,7 @@ impl AcmeStateMachine {
         if let Err(e) = validate_bundle(&self.config, &bundle) {
             let reason = match &e {
                 AcmeError::OrderFailed(msg) => msg.as_str(),
-                // Dead arm by contract: `validate_bundle` only returns
-                // `AcmeError::OrderFailed`; this wildcard is a safety net
-                // in case a future refactor widens the error set (bucket 2).
+                // Safety net: validate_bundle only returns OrderFailed.
                 _ => "bundle validation failed",
             };
             warn!(domain = %domain, reason = %reason, "cached bundle invalid; will re-issue");
@@ -2596,18 +2587,9 @@ mod tests {
         );
     }
 
-    // ────────────────────────────────────────────────────────────────────────
-    // inspect_state: not_after before Unix epoch (u64::try_from fails)
-    //
-    // A cert whose not_after timestamp predates 1970-01-01 produces a negative
-    // i64 that cannot be converted to u64.  inspect_state must report it as
-    // CertCachedButInvalid rather than panicking or treating it as expired.
-    // ────────────────────────────────────────────────────────────────────────
-
     #[test]
     fn inspect_state_returns_invalid_when_not_after_is_pre_unix_epoch() {
         let tmp = tempfile::tempdir().unwrap();
-        // not_after = -1 → 1969-12-31T23:59:59 UTC; u64::try_from(-1) fails.
         let (cert_pem, key_pem) = generate_cert(-1, &["a.example.test"]);
         std::fs::write(tmp.path().join("cert.pem"), &cert_pem).unwrap();
         std::fs::write(tmp.path().join("key.pem"), &key_pem).unwrap();
@@ -2624,14 +2606,6 @@ mod tests {
         }
     }
 
-    // ────────────────────────────────────────────────────────────────────────
-    // Bundle validation failure emits a heartbeat when due
-    //
-    // When the issuer returns a bundle that fails `validate_bundle` and
-    // `heartbeat_every_ticks == 1`, the validation-failure path must call
-    // `emit_heartbeat` (line 352 in production code).
-    // ────────────────────────────────────────────────────────────────────────
-
     #[traced_test]
     #[tokio::test]
     async fn validation_failure_emits_heartbeat_when_due() {
@@ -2644,7 +2618,6 @@ mod tests {
             }
         }
 
-        // Issuer returns an unparseable bundle so validate_bundle rejects it.
         let issuer = Box::new(MockIssuer::with_results(vec![Ok(CertBundle {
             cert_pem: b"not a cert".to_vec(),
             key_pem: b"not a key".to_vec(),
@@ -2661,13 +2634,6 @@ mod tests {
         );
     }
 
-    // ────────────────────────────────────────────────────────────────────────
-    // Issuance timeout emits a heartbeat when due
-    //
-    // When the issuer never resolves (HangingIssuer), the tokio::time::timeout
-    // fires and the timeout arm must call `emit_heartbeat` when due (line 453).
-    // ────────────────────────────────────────────────────────────────────────
-
     #[traced_test]
     #[tokio::test]
     async fn issuance_timeout_emits_heartbeat_when_due() {
@@ -2681,7 +2647,6 @@ mod tests {
         }
 
         let mut cfg = test_config(tmp.path());
-        // Use the shortest possible timeout so the test finishes quickly.
         cfg.issuance_timeout_seconds = 1;
 
         let mut sm =
@@ -2696,16 +2661,6 @@ mod tests {
         );
     }
 
-    // ────────────────────────────────────────────────────────────────────────
-    // validate_bundle: cert with only IP SANs — non-DNS SAN filter_map None arm
-    //
-    // When a cert has no DNS SANs (only e.g. an IP address SAN), the
-    // filter_map inside validate_bundle takes the `else { None }` branch for
-    // every GeneralName, yielding an empty DNS-name set.  The configured domain
-    // is therefore absent and validate_bundle returns OrderFailed.
-    // load_cached_bundle must reject such a bundle and return Ok(None).
-    // ────────────────────────────────────────────────────────────────────────
-
     #[traced_test]
     #[tokio::test]
     async fn load_cached_bundle_none_when_cert_has_only_ip_sans() {
@@ -2714,7 +2669,6 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let now_unix = time::OffsetDateTime::now_utc().unix_timestamp();
 
-        // Build a cert whose only SAN is an IPv4 address, not a DNS name.
         let key = KeyPair::generate().unwrap();
         let mut params = CertificateParams::default();
         let not_after =
