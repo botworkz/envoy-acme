@@ -27,8 +27,6 @@ mod http_filter;
 mod metrics;
 mod runtime;
 mod state_lock;
-#[cfg(test)]
-mod test_stubs;
 
 use envoy_proxy_dynamic_modules_rust_sdk::*;
 
