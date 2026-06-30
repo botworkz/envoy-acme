@@ -211,14 +211,21 @@ impl TryFrom<RawAcmeConfig> for AcmeConfig {
         }
         let address = &contact["mailto:".len()..];
         if address.is_empty() {
-            return Err("acme.contact has a mailto: prefix but no address; \
+            return Err(format!(
+                "acme.contact has a mailto: prefix but no address; \
                  e.g. \"mailto:admin@example.test\""
-                .to_string());
+            ));
         }
-        if !address.contains('@') || address.chars().any(char::is_whitespace) {
+        if !address.contains('@') {
             return Err(format!(
                 "acme.contact mailto: address {address:?} is not a valid email \
-                 (must contain '@' and no whitespace)"
+                 (must contain '@')"
+            ));
+        }
+        if address.chars().any(char::is_whitespace) {
+            return Err(format!(
+                "acme.contact mailto: address {address:?} is not a valid email \
+                 (must contain no whitespace)"
             ));
         }
 
